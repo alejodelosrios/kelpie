@@ -40,3 +40,17 @@ Formato: `- [YYYY-MM-DD] #issue — qué se vio · por qué no se arregló ahora
   dispara si vuelve a pasar en otro issue: investigar si el prompt necesita ir por archivo en vez de
   inline, y medir si el límite real de MiMo en esta máquina es más bajo que 30 min para tareas de
   escritura+build.
+- [2026-08-27] #4 — `src/vt_spike.zig:34` usa `@intCast(cp)` de `u21` a `u8` en el volcado de texto
+  plano, que aborta en modo seguro con cualquier codepoint > 255 · no dispara en este spike porque el
+  stream fijo es ASCII, pero `dumpDirty` es justo el tipo de helper que se recicla para depurar salida
+  real · dispara si se reutiliza fuera de este test: cambiar a `std.unicode.utf8Encode` antes de
+  tocar entrada no controlada.
+- [2026-08-27] #4 — `src/vt_spike.zig:98` lee `cell.style.fg_color.palette` sin comprobar el tag de
+  la unión; si la variante no fuera `.palette` el test entraría en panic en vez de fallar como
+  aserción normal · aceptado porque es ruido de diagnóstico dentro de un test, no código de producto ·
+  no dispara nada salvo que este patrón de lectura se copie a código de producción.
+- [2026-08-27] #4 — el spike usa `RenderState.update()` (las dos fases juntas); el widget de M2 debe
+  usar `beginUpdate`/`endUpdate` por separado bajo mutex, porque entre las dos fases el estilo por
+  celda queda "stale" por diseño (`render.zig:373-378`) y `update()` sostendría el lock durante la
+  denormalización de estilos · no aplica a este spike (sin hilos) · dispara al diseñar el widget de
+  render en M2: usar las dos fases explícitas, nunca `update()`.
