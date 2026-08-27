@@ -17,3 +17,9 @@ Formato: `- [YYYY-MM-DD] #issue — qué se vio · por qué no se arregló ahora
   ayuda y la notificación nunca sale · el spike E se salvó por casualidad (su argv usa `-c`, no
   `-h`) y no entra en el alcance de este issue arreglarlo · dispara al diseñar #18: kelpie debe
   invocar `omarchy-notification-send` directo, nunca a través del dispatcher `omarchy`.
+- [2026-08-27] #6 — `scripts/spike-e.sh` no valida que `omarchy-shell notifications isDnd` haya
+  devuelto algo: si falla, `dnd_original` queda vacío y el restore (trap + explícito) manda
+  `setDnd ""`, que Omarchy interpreta como apagado aunque el original estuviera encendido · en un
+  runbook interactivo que ya asume el shell vivo no vale una iteración de builder · dispara si este
+  patrón de leer/restaurar un toggle se reutiliza en código de producción de kelpie (#18): ahí sí
+  necesita el guard de valor vacío.
