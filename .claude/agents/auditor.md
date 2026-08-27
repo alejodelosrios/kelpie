@@ -34,7 +34,10 @@ Recibes del PM: el diseño aprobado (`roadmap/designs/<N>-*.md`) con sus escenar
    (§2); tocar `build.zig.zon` o el commit pinneado sin que ese sea el issue; dependencias nuevas.
 7. **Alcance.** ¿El diff hace lo que el diseño dijo y **solo** eso? Refactor no pedido, archivos
    fuera del territorio del builder, "mejoras" de paso: se reportan.
-8. **Los escenarios Gherkin.** ¿Cada uno está realmente cubierto por el código y por un test, o solo
+8. **El ledger de lecciones.** Cruza el diff contra `lessons-learned.md`: ¿este cambio repite algo
+   que ya hizo fallar un ciclo? Es barato y es el hallazgo más valioso que puedes traer — un fallo
+   reincidente ya tiene su regla escrita y aun así volvió.
+9. **Los escenarios Gherkin.** ¿Cada uno está realmente cubierto por el código y por un test, o solo
    por la buena voluntad del reporte?
 
 # Cómo entregas
