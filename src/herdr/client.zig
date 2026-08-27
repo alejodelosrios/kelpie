@@ -57,7 +57,10 @@ pub const Connection = struct {
 };
 
 /// Resolve the herdr socket path from environment or default.
-/// Returns a slice into `buf` (caller provides storage).
+/// Returns `HERDR_SOCKET_PATH` verbatim (a slice into `environ`'s own
+/// storage) if set, otherwise builds `$HOME/.config/herdr/herdr.sock` into
+/// `buf`. The returned slice's lifetime differs per branch — copy it out
+/// immediately if you need it to outlive `environ`.
 pub fn resolveSocketPath(
     environ: std.process.Environ.Map,
     buf: *[std.fs.max_path_bytes]u8,
@@ -101,21 +104,30 @@ fn liveSocketPathOrSkip(buf: *[std.fs.max_path_bytes]u8) ![]const u8 {
     return buf[0..resolved.len];
 }
 
-fn openLive(buf: *[std.fs.max_path_bytes]u8) !?Connection {
+/// Out-parameter, not a return-by-value: `Connection.open` fixes
+/// `reader`/`writer` buffer pointers at `conn`'s address, so `conn` must
+/// already live at its final memory location before this is called (same
+/// contract as `Connection.open` itself — see its doc-comment).
+fn openLive(conn: *Connection, buf: *[std.fs.max_path_bytes]u8) !void {
     const path = try liveSocketPathOrSkip(buf);
 
-    var conn: Connection = undefined;
     conn.open(testing.io, path) catch |err| {
-        if (err == error.FileNotFound) return null; // no live socket here: skip
+        if (err == error.FileNotFound) return error.SkipZigTest; // no live socket here
         return err; // any other failure is a real test failure
     };
-    return conn;
 }
 
 test "ping responds pong with protocol >= 20" {
     var path_buf: [std.fs.max_path_bytes]u8 = undefined;
-    var conn = (try openLive(&path_buf)) orelse return error.SkipZigTest;
+    var conn: Connection = undefined;
+    try openLive(&conn, &path_buf);
     defer conn.close();
+
+    // Regression check: `Connection.open` fixes `reader.interface.buffer` to
+    // point at `conn.read_buf`'s address. If `openLive` ever goes back to
+    // returning `Connection` by value (copying it out of a dead stack frame)
+    // this pointer stops matching the copy's own `read_buf`.
+    try testing.expectEqual(@intFromPtr(&conn.read_buf), @intFromPtr(conn.reader.interface.buffer.ptr));
 
     const line = try conn.sendRequest(.{ .id = "1", .method = "ping", .params = .{} });
     const parsed = try json.parseFromSlice(json.Value, testing.allocator, line, .{ .ignore_unknown_fields = true });
@@ -133,7 +145,8 @@ test "ping responds pong with protocol >= 20" {
 
 test "session.snapshot returns workspaces with tab_count and pane_count" {
     var path_buf: [std.fs.max_path_bytes]u8 = undefined;
-    var conn = (try openLive(&path_buf)) orelse return error.SkipZigTest;
+    var conn: Connection = undefined;
+    try openLive(&conn, &path_buf);
     defer conn.close();
 
     const line = try conn.sendRequest(.{ .id = "1", .method = "session.snapshot", .params = .{} });
@@ -156,7 +169,8 @@ test "session.snapshot returns workspaces with tab_count and pane_count" {
 
 test "agent.list entries carry pane_id, agent and agent_status" {
     var path_buf: [std.fs.max_path_bytes]u8 = undefined;
-    var conn = (try openLive(&path_buf)) orelse return error.SkipZigTest;
+    var conn: Connection = undefined;
+    try openLive(&conn, &path_buf);
     defer conn.close();
 
     const line = try conn.sendRequest(.{ .id = "1", .method = "agent.list", .params = .{} });
@@ -186,7 +200,8 @@ test "agent.list entries carry pane_id, agent and agent_status" {
 
 test "a non-string id is rejected as invalid_request" {
     var path_buf: [std.fs.max_path_bytes]u8 = undefined;
-    var conn = (try openLive(&path_buf)) orelse return error.SkipZigTest;
+    var conn: Connection = undefined;
+    try openLive(&conn, &path_buf);
     defer conn.close();
 
     try conn.writer.interface.writeAll(
@@ -207,7 +222,8 @@ test "a non-string id is rejected as invalid_request" {
 
 test "a request missing params is rejected as invalid_request" {
     var path_buf: [std.fs.max_path_bytes]u8 = undefined;
-    var conn = (try openLive(&path_buf)) orelse return error.SkipZigTest;
+    var conn: Connection = undefined;
+    try openLive(&conn, &path_buf);
     defer conn.close();
 
     try conn.writer.interface.writeAll(
@@ -228,7 +244,8 @@ test "a request missing params is rejected as invalid_request" {
 
 test "a second non-subscription request on the same connection fails" {
     var path_buf: [std.fs.max_path_bytes]u8 = undefined;
-    var conn = (try openLive(&path_buf)) orelse return error.SkipZigTest;
+    var conn: Connection = undefined;
+    try openLive(&conn, &path_buf);
     defer conn.close();
 
     // First request succeeds. Written by hand (not `sendRequest`) so we can
@@ -287,7 +304,8 @@ fn takeLine(r: *std.Io.Reader) ![]u8 {
 
 test "events.subscribe opens a persistent stream and acks subscription_started" {
     var path_buf: [std.fs.max_path_bytes]u8 = undefined;
-    var conn = (try openLive(&path_buf)) orelse return error.SkipZigTest;
+    var conn: Connection = undefined;
+    try openLive(&conn, &path_buf);
     defer conn.close();
 
     const subscribe_json =
