@@ -8,6 +8,13 @@ permission:
   edit: allow
   bash: allow
   task: deny
+  # Fuentes de verdad fuera del proyecto: el mirror pinneado de Ghostty (runtime GTK4 real) y
+  # /usr/share/omarchy (la documentación real de Omarchy). Ambas SOLO LECTURA por convención:
+  # escribir en /usr/share/omarchy está prohibido y lo verifica el auditor.
+  external_directory:
+    "/home/alejodelosrios/.cache/ghostty-build/**": allow
+    "/usr/share/omarchy/**": allow
+    "*": ask
 ---
 
 # Rol

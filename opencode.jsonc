@@ -1,17 +1,14 @@
 {
   "$schema": "https://opencode.ai/config.json"
   // Los builders (core-builder, ui-builder, docs-writer) viven en .opencode/agents/ y corren
-  // mimo/mimo-v2.5-pro. El provider `mimo` se define en la config GLOBAL
-  // (~/.config/opencode/opencode.json) para que la API key no viaje en el repo:
+  // mimo/mimo-v2.5-pro. El provider `mimo` (baseURL + apiKey) se define en la config GLOBAL
+  // ~/.config/opencode/opencode.jsonc para que la credencial no viaje en el repo. Verificado el
+  // 2026-08-26 en esta máquina; en una máquina nueva se replica desde la Mac (host ssh `m2`).
   //
-  //   "provider": {
-  //     "mimo": {
-  //       "npm": "@ai-sdk/openai-compatible",
-  //       "options": { "baseURL": "<endpoint OpenAI-compat>", "apiKey": "{env:MIMO_API_KEY}" },
-  //       "models": { "mimo-v2.5-pro": { "name": "MiMo v2.5 Pro" } }
-  //     }
-  //   }
-  //
-  // Sin ese bloque, `opencode run --agent core-builder` cae EN SILENCIO al agente `build` con otro
-  // modelo. /kelpie-flow hace un smoke test antes de cada Apply justo por eso.
+  // Dos trampas, ambas ya cableadas en los agentes:
+  //  - Sin ese provider, `opencode run --agent X` cae EN SILENCIO al agente `build` con otro
+  //    modelo. Por eso /kelpie-flow hace smoke test antes de cada Apply.
+  //  - OpenCode auto-rechaza leer fuera del proyecto (permiso `external_directory`), lo que dejaría
+  //    al builder sin el mirror pinneado de Ghostty, es decir escribiendo firmas de memoria. Cada
+  //    builder lo tiene abierto solo a su fuente de verdad, en su propio frontmatter.
 }

@@ -88,6 +88,12 @@ modelo, el agente cayó al default en silencio → **NO CONFÍES EN EL RESULTADO
 frontmatter diga `mode: primary` y que el provider `mimo` exista en `~/.config/opencode/opencode.json`.
 Si el provider no está configurado, ve directo al fallback Claude y avisa al humano.
 
+Si el builder reporta `permission requested: external_directory … auto-rejecting`, **para**: se
+quedó sin poder leer el mirror pinneado, o sea sin su única fuente de firmas. No lo dejes seguir "a
+ver qué sale" — eso es exactamente escribir de memoria. El permiso vive en el frontmatter del agente
+(`external_directory`), abierto solo a su fuente de verdad; si el mirror cambió de ruta, actualízalo
+ahí antes de relanzar.
+
 Reparto de territorio (**file-sets disjuntos, sin excepción**):
 
 | Builder | Territorio |

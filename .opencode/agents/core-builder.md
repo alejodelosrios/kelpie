@@ -8,6 +8,11 @@ permission:
   edit: allow
   bash: allow
   task: deny
+  # El mirror pinneado de Ghostty vive FUERA del proyecto y es la única fuente de verdad de las
+  # firmas: sin este permiso el builder no puede citar y acaba escribiendo de memoria.
+  external_directory:
+    "/home/alejodelosrios/.cache/ghostty-build/**": allow
+    "*": ask
 ---
 
 # Rol
