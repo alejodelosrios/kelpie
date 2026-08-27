@@ -1,5 +1,6 @@
 const std = @import("std");
 const ghostty_vt = @import("ghostty-vt");
+const herdr_probe = @import("herdr/probe.zig");
 
 pub const name = "kelpie";
 // ponytail: duplicated from build.zig.zon on purpose; wire a build option when the version is set by CI.
@@ -11,8 +12,19 @@ pub fn main(init: std.process.Init) !void {
 
     const args = try init.minimal.args.toSlice(init.arena.allocator());
     var vt_info = false;
+    var herdr_probe_flag = false;
     for (args[1..]) |arg| {
         if (std.mem.eql(u8, arg, "--vt-info")) vt_info = true;
+        if (std.mem.eql(u8, arg, "--herdr-probe")) herdr_probe_flag = true;
+    }
+
+    if (herdr_probe_flag) {
+        if (init.environ_map.get("HERDR_ENV") == null) {
+            try stdout.interface.print("error: --herdr-probe requires HERDR_ENV=1 (must run inside a herdr session)\n", .{});
+            try stdout.interface.flush();
+            return;
+        }
+        return herdr_probe.run(init);
     }
 
     if (vt_info) {
