@@ -70,10 +70,13 @@ git switch -c <prefijo>/<N>-<slug> origin/develop     # feature|fix|docs|chore
 
 **DETENTE. El humano aprueba el diseño antes de que se escriba una línea de código.** Este es el
 gate barato: corregir el plan cuesta un mensaje, corregir el Apply cuesta el ciclo entero.
-Como hijo del fleet: el gate lo aprueba el orquestador contra el issue enriquecido; escala al humano
-solo lo genuinamente ambiguo.
+**El gate de diseño es del humano SIEMPRE, también como hijo del fleet** (CLAUDE.md, pipeline:
+`diseño + Gherkin (🛑 gate humano)`). El orquestador aprueba el **scope gate**, no este. Un
+orquestador aprobándose a sí mismo el contrato del issue borra el único punto donde una spec
+equivocada sale gratis.
 
-Commitea el diseño aprobado antes del Apply.
+Al aprobar, estampa `Aprobado por: <humano> · <fecha>` en la cabecera del diseño — el template nace
+como `PENDIENTE DE APROBACIÓN` a propósito. Commitea el diseño ya aprobado antes del Apply.
 
 ## FASE 4 — Apply (OpenCode + MiMo v2.5-pro)
 
@@ -101,6 +104,24 @@ Reparto de territorio (**file-sets disjuntos, sin excepción**):
 | `core-builder` | `src/terminal/`, `src/rpc/`, `src/pty/`, `src/ssh/`, `src/font/` — labels `area:vt,render,pty,rpc,ssh,font` |
 | `ui-builder` | `src/ui/`, `src/omarchy/`, `PKGBUILD`, `.github/` — labels `area:ui,omarchy,pkg` |
 | `docs-writer` | `docs/`, `README.md`, `CHANGELOG.md` — nunca código |
+
+**Los hotspots tienen dueño, y no eres tú.** `build.zig`, `build.zig.zon`, `src/main.zig` y
+`src/app.zig` no caen en ninguna carpeta de la tabla, y ahí es donde el Apply se escapa: el hijo se
+queda sin dueño declarado y escribe el código él mismo, en silencio, sin desobedecer nada.
+Asignación explícita:
+
+| Hotspot | Dueño |
+|---|---|
+| `build.zig`, `build.zig.zon`, `src/main.zig`, `src/app.zig` | `core-builder` |
+| `.github/workflows/*` | `ui-builder` (territorio `.github/`), salvo que el issue sea solo de CI |
+
+Un issue cuyos archivos son **solo** hotspots (los spikes de bootstrap, típicamente) sigue yendo al
+`core-builder`: que el archivo no viva en `src/terminal/` no lo convierte en trabajo del PM.
+
+**Escribir el Apply tú mismo es la excepción, no el atajo**, y solo vale para: (a) shell/`scripts/`
+puro, (b) el fallback documentado tras dos intentos fallidos del builder. En ambos casos el estado
+debe quedar escrito: `intentos_apply` y el motivo. Un `intentos_apply: 0` en un issue con código Zig
+es un Apply que nunca ocurrió — el PM lo rechaza y lo manda al builder.
 
 Si un issue cruza territorios (p.ej. #35 lleva `area:ssh` + `area:ui`), **secuencia**: primero core,
 verificas, commiteas, luego ui. Nunca los dos a la vez sobre el mismo checkout.

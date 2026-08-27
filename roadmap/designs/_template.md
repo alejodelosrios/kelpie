@@ -1,6 +1,10 @@
 # Diseño — #<N> <título del issue>
 
-> Aprobado por: <humano> · <fecha> · rama `<prefijo>/<N>-<slug>`
+> Estado: **PENDIENTE DE APROBACIÓN** · rama `<prefijo>/<N>-<slug>`
+>
+> Al aprobar el gate, y solo entonces, sustituye la línea de arriba por
+> `Aprobado por: <humano> · <fecha>`. Escribirla antes deja en el repo un registro de una
+> aprobación que nunca ocurrió.
 
 ## Spec
 

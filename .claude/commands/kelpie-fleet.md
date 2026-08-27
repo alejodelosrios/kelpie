@@ -51,23 +51,64 @@ git worktree add ../kelpie-<N> -b <prefijo>/<N>-<slug> origin/develop
 
 ## FASE 2 — Lanzar los hijos (verifica que arrancaron)
 
-Un pane de Herdr por worktree. Envío fiable:
+Un pane de Herdr por worktree. Tres trampas verificadas en la Ola 1 de M0; las tres dejan un pane
+que parece vivo y no hace nada:
 
-```sh
-herdr pane run '<pane>' 'cd ../kelpie-<N> && claude'
-herdr pane run '<pane>' '/kelpie-flow <N>'
-```
+1. **Un pane con `agent_status: unknown` no es un pane libre.** Puede tener lazygit, vim o un pager
+   abierto: `pane run` entra como **teclas dentro de esa TUI**, no como comando. Comprueba antes con
+   `herdr pane process-info '<pane>'`; si no es una shell, **no lo reutilices** — abre uno nuevo, que
+   además nace con el cwd correcto:
 
-**Nunca fire-and-forget:** tras lanzar, `herdr pane read` y confirma que el hijo arrancó y está en
-FASE 1. Un slash-command que no entró deja un pane que parece vivo y no hace nada.
+   ```sh
+   herdr pane split '<pane-vecino>' --direction right --cwd "$PWD/../kelpie-<N>"
+   ```
+
+2. **`pane run` escribe el texto pero no lo envía dentro de Claude.** Lanzar el binario funciona
+   (la shell sí ejecuta), pero el slash-command se queda tipeado en el prompt. Remata siempre con
+   `send-keys Enter`:
+
+   ```sh
+   herdr pane run '<pane>' 'claude --model sonnet'      # la shell lo ejecuta
+   herdr pane read '<pane>'                             # confirma que hay prompt de Claude
+   herdr pane run '<pane>' '/kelpie-flow <N>'
+   herdr pane send-keys '<pane>' Enter                  # sin esto el hijo nunca arranca
+   ```
+
+3. **Nunca fire-and-forget:** tras el Enter, `herdr pane read` y confirma spinner o FASE 1 en
+   pantalla. Un `%` de contexto que no crece es un hijo que no arrancó.
 
 Los hijos corren con **Sonnet** (los issues vienen enriquecidos: ejecutan una spec acotada, no
 diseñan en abierto). Si un issue resulta genuinamente ambiguo, súbelo a Opus tú.
 
 ## FASE 3 — Vigilancia (el trabajo real del orquestador)
 
-**Listener persistente, no solo mirar merges.** Un hijo puede quedarse atorado en cualquier fase
-esperando una respuesta tuya. Distingue:
+**El listener se ARMA, no se recuerda.** Vigilar "a ojo" falla siempre: los hijos llegan al primer
+gate en ~2 min y quedan ahí callados hasta que alguien mira. En cuanto los panes estén corriendo,
+arma un `Monitor` persistente sobre `agent_status` — `working` es silencio, cualquier otra cosa es
+un evento que te llega al chat:
+
+```
+prev=""
+while true; do
+  cur=$(herdr pane list 2>/dev/null | jq -r '.result.panes[]
+    | select(.pane_id=="<pane-A>" or .pane_id=="<pane-B>")
+    | "\(.pane_id) \(.agent_status)"' | sort || true)
+  if [ -n "$cur" ]; then
+    comm -13 <(echo "$prev") <(echo "$cur") 2>/dev/null | grep -v ' working$' || true
+    prev="$cur"
+  fi
+  sleep 20
+done
+```
+
+Cubre los tres finales, no solo el feliz: `idle` (te espera), `blocked`/`done` y `unknown` (el hijo
+murió). Si solo vigilaras el merge, un hijo caído se ve idéntico a un hijo pensando.
+
+**El primer gate que te llega es el scope gate, y lo apruebas TÚ**, no el humano: contrástalo contra
+el issue (archivos declarados dentro de su territorio, nada de scope extra) y sigue. Al humano solo
+le suben los gates de diseño, los spikes que fallan su criterio binario y los merges.
+
+Un hijo puede quedarse atorado en cualquier fase esperando una respuesta tuya. Distingue:
 
 - **esperando a un subagente** (QA, auditor corriendo) = **activo**, no lo toques;
 - **esperándote a TI** (scope gate, gate de diseño, menú, pregunta) = **idle bloqueado**, atiéndelo ya.
