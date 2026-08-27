@@ -23,3 +23,12 @@ Formato: `- [YYYY-MM-DD] #issue — qué se vio · por qué no se arregló ahora
   runbook interactivo que ya asume el shell vivo no vale una iteración de builder · dispara si este
   patrón de leer/restaurar un toggle se reutiliza en código de producción de kelpie (#18): ahí sí
   necesita el guard de valor vacío.
+- [2026-08-27] #2 — `.gitignore` recibió `zig-pkg/` sin estar en la lista de archivos del diseño ·
+  necesario porque Zig 0.16 materializa las lazy deps en `zig-pkg/` local al proyecto (~136 MB) y sin
+  ignorarla el repo se ensucia · dispara si un futuro diseño quiere que las deps vivan en otro lado.
+- [2026-08-27] #2 — CI no cachea `zig-pkg/`: cada job re-descarga y descomprime el tarball de
+  ghostty (~136 MB) · no se resolvió en este spike porque es costo de CI transversal, no de este
+  issue · dispara cuando el tiempo de CI moleste — issue dedicado con `actions/cache` sobre `zig-pkg/`.
+- [2026-08-27] #2 — segundo test en `src/main.zig` (dimensiones no-hardcodeadas) es casi redundante
+  con el primero · se dejó porque descarta un caso real de API que ignora `Options` · no dispara nada,
+  aceptado como está.
