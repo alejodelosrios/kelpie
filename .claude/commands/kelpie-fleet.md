@@ -104,6 +104,23 @@ done
 Cubre los tres finales, no solo el feliz: `idle` (te espera), `blocked`/`done` y `unknown` (el hijo
 murió). Si solo vigilaras el merge, un hijo caído se ve idéntico a un hijo pensando.
 
+**Dos propiedades que el listener necesita, y que se aprendieron fallando:**
+
+1. **Latido, no solo flanco.** Un hijo esperando es un *estado*, no un evento. Si el monitor solo
+   emite en el cambio, un hijo que entra en `blocked` avisa una vez y calla mientras espera. Re-emite
+   cada 2-3 min mientras haya alguien fuera de `working`.
+2. **Se re-arma en CADA reanudación.** Al parar el fleet se apaga el monitor; al reanudar hay que
+   **volver a armarlo antes de tocar a ningún hijo**. Reanudar a los hijos sin reactivar la vigilancia
+   deja el fleet corriendo a ciegas — y quien lo nota es el humano, avisando por tercera vez.
+
+**Checklist de reanudación**, en este orden y sin saltarse el primero:
+
+```
+1. armar el Monitor        <- SIEMPRE primero
+2. leer estado real        (state files + git log/status de cada worktree + gh pr list)
+3. reanudar a los hijos
+```
+
 **El primer gate que te llega es el scope gate, y lo apruebas TÚ**, no el humano: contrástalo contra
 el issue (archivos declarados dentro de su territorio, nada de scope extra) y sigue. Al humano solo
 le suben los gates de diseño, los spikes que fallan su criterio binario y los merges.
