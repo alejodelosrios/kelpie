@@ -1,0 +1,17 @@
+{
+  "$schema": "https://opencode.ai/config.json"
+  // Los builders (core-builder, ui-builder, docs-writer) viven en .opencode/agents/ y corren
+  // mimo/mimo-v2.5-pro. El provider `mimo` se define en la config GLOBAL
+  // (~/.config/opencode/opencode.json) para que la API key no viaje en el repo:
+  //
+  //   "provider": {
+  //     "mimo": {
+  //       "npm": "@ai-sdk/openai-compatible",
+  //       "options": { "baseURL": "<endpoint OpenAI-compat>", "apiKey": "{env:MIMO_API_KEY}" },
+  //       "models": { "mimo-v2.5-pro": { "name": "MiMo v2.5 Pro" } }
+  //     }
+  //   }
+  //
+  // Sin ese bloque, `opencode run --agent core-builder` cae EN SILENCIO al agente `build` con otro
+  // modelo. /kelpie-flow hace un smoke test antes de cada Apply justo por eso.
+}

@@ -1,0 +1,105 @@
+---
+description: Supervisa varios /kelpie-flow en paralelo (uno por issue) en worktrees y panes de Herdr. Segunda puerta para ≥2 issues.
+---
+
+# /kelpie-fleet — orquestador multi-issue
+
+Eres el **orquestador**. No escribes código ni procesas issues tú mismo: lanzas un hijo
+`/kelpie-flow` por issue, cada uno en su worktree y su pane de Herdr, y los coordinas por blackboard
+(git + GitHub + este pane). **Los hijos nunca hablan entre sí.**
+
+Argumento: `$ARGUMENTS` — números de issue.
+
+---
+
+## FASE 0 — Admisión (dónde se gana o se pierde el paralelismo)
+
+1. Con 1 solo issue → corre `/kelpie-flow <N>` aquí mismo, sin worktree. No montes un fleet para uno.
+2. Lee cada issue (`gh issue view`) y extrae **dominio** (de los labels `area:*`) y **dependencias**
+   (la línea "Depende de #N" del cuerpo — tus issues la traen).
+3. **Regla de admisión, derivada, no escrita a mano:** dos issues corren en paralelo si y solo si
+   ninguno está en el `depende_de` del otro **y** no comparten territorio de builder.
+   - `area:vt|render|pty|rpc|ssh|font` → territorio **core**
+   - `area:ui|omarchy|pkg` → territorio **ui**
+   - Mismo territorio sin dependencia: **pueden correr en paralelo, con rebase obligatorio sobre
+     `develop` antes del PR** (el ruleset de GitHub lo exige de todas formas).
+4. **Hotspots de kelpie** (archivos que casi todo issue toca, aunque los dominios sean disjuntos):
+   `build.zig`, `src/main.zig`, `src/app.zig`. Se manejan por **lease, no por bloqueo**: si dos
+   hijos van a tocar el mismo hotspot, se lo das a uno y el otro espera a la siguiente ola, o lo
+   editas tú en el pane principal. Anótalo al planear la ola.
+5. Imprime el **plan de olas** (qué corre junto, qué espera y por qué) y **DETENTE** hasta que el
+   humano lo apruebe. Si el conjunto no puede correr junto, dilo con nombre y apellido: no lo
+   serialices en silencio ni lo lances en paralelo esperando suerte.
+
+Ola típica de M0: los spikes #2–#6 son independientes y con criterio binario — la ola perfecta.
+Ojo con #3 (renderer) y #6 (toast): sus gates **abren ventana en tu sesión Wayland**; los hijos
+compilan y miden en paralelo, pero la verificación visual se serializa contigo.
+
+## FASE 1 — Worktrees
+
+Uno por issue, desde `develop`:
+
+```sh
+git fetch origin develop
+git worktree add ../kelpie-<N> -b <prefijo>/<N>-<slug> origin/develop
+```
+
+- `.claude/` va **versionado**, así que el worktree nace con comandos, agentes y skills. No hay
+  symlinks que mantener.
+- Zig no necesita provisión: `.zig-cache/` y `zig-out/` se regeneran, y las deps van al cache global.
+  Un `zig build` inicial en cada worktree calienta el cache y confirma que el árbol está sano.
+
+## FASE 2 — Lanzar los hijos (verifica que arrancaron)
+
+Un pane de Herdr por worktree. Envío fiable:
+
+```sh
+herdr pane run '<pane>' 'cd ../kelpie-<N> && claude'
+herdr pane run '<pane>' '/kelpie-flow <N>'
+```
+
+**Nunca fire-and-forget:** tras lanzar, `herdr pane read` y confirma que el hijo arrancó y está en
+FASE 1. Un slash-command que no entró deja un pane que parece vivo y no hace nada.
+
+Los hijos corren con **Sonnet** (los issues vienen enriquecidos: ejecutan una spec acotada, no
+diseñan en abierto). Si un issue resulta genuinamente ambiguo, súbelo a Opus tú.
+
+## FASE 3 — Vigilancia (el trabajo real del orquestador)
+
+**Listener persistente, no solo mirar merges.** Un hijo puede quedarse atorado en cualquier fase
+esperando una respuesta tuya. Distingue:
+
+- **esperando a un subagente** (QA, auditor corriendo) = **activo**, no lo toques;
+- **esperándote a TI** (scope gate, gate de diseño, menú, pregunta) = **idle bloqueado**, atiéndelo ya.
+
+Lo que apruebas tú, contra el issue enriquecido y su diseño:
+- **scope gates** de los hijos,
+- **gates de diseño** (la spec + Gherkin) — esta es la aprobación que más te va a llegar,
+- decisiones de fallback a Claude cuando MiMo falló dos veces.
+
+Lo que escalas al humano: contradicciones entre el issue y el código, un spike que **falla su
+criterio binario** (ADR-0001: se para y se informa, no se improvisa un workaround), un auditor que
+DENIEGA dos veces, y **todo merge**.
+
+**Vigila también el avance de `develop`**: si mergeas un PR, los demás hijos quedan desactualizados
+y el ruleset les exigirá rebase. Avísales en cuanto pase; no esperes a que su PR rebote.
+
+**No mates a un hijo por reloj.** Un QA visual riguroso tarda. Mata por **falta de progreso**: sin
+cambios en su diff ni en su pane durante varios ciclos, no por minutos transcurridos.
+
+## FASE 4 — Cierre (nadie más lo hace)
+
+Por cada hijo que mergeó su PR:
+
+```sh
+git worktree remove ../kelpie-<N>
+git branch -d <prefijo>/<N>-<slug>
+gh issue close <N>
+```
+
+Al final: `git worktree list` y `gh issue list --state open` para confirmar que no quedaron
+worktrees huérfanos ni issues abiertos de trabajo ya mergeado. Un fleet sin cierre deja basura que
+el siguiente fleet hereda.
+
+Resume al humano: qué mergeó, qué quedó pendiente y por qué, qué entró en `CONCERNS.md`, y qué
+aprendiste que ya está en las skills.

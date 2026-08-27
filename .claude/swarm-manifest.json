@@ -1,0 +1,106 @@
+{
+  "proyecto": "kelpie",
+  "generado_por": "/swarm-architect",
+  "generado": "2026-08-26",
+  "arquetipo": "B-hibrido-completo",
+  "arquetipo_nota": "El dueño eligió B completo (los tres builders en OpenCode+MiMo v2.5-pro) sabiendo que este stack —Zig 0.16 recién estrenado, ghostty-vt inestable pinneado por commit, GTK4 por bindings generados— es terreno de alucinación de firmas. La apuesta se sostiene sobre cinco defensas, no sobre el modelo: (1) zig build/test como juez mecánico antes de que el PM lea nada, (2) contrato de citas archivo:línea que el PM verifica ejecutando sed, (3) mirror pinneado obligatorio con rutas absolutas en el prompt del agente, (4) territorio congelado —build.zig.zon y deps intocables—, (5) mode:primary + temperature 0.0 + smoke test antes de cada Apply. El auditor sigue en Claude Opus: eso no se abarata.",
+
+  "stack": {
+    "lenguaje": "zig",
+    "version": "0.16.0",
+    "framework": "GTK4 + libadwaita vía zig-gobject; VT por el módulo Zig ghostty-vt",
+    "tipo": "app-gtk-nativa",
+    "plataforma": "Omarchy / Arch Linux / Wayland",
+    "dep_pinneada": "ghostty commit 15ff186f65ca0bdbd1fa397ab03908d59de16463",
+    "mirror_fuente": "~/.cache/ghostty-build/src/ghostty/"
+  },
+
+  "motor_apply": "opencode-mimo",
+  "hardware_en_loop": false,
+  "qa_visual_requerido": true,
+  "qa_visual_nota": "No hay hardware, pero sí gates que exigen la sesión Wayland real del humano: >=60 fps redibujando 200x60, retematizar en vivo sin un color fuera de sitio, toast clickeable que enfoca el agente, stty size contra la rejilla. El fleet compila y mide en paralelo; estos gates se serializan con el humano.",
+
+  "repo": {
+    "modelo": "propio",
+    "origin": "git@github.com:alejodelosrios/kelpie.git",
+    "visibilidad": "public",
+    "rama_estable": "main",
+    "rama_base": "develop",
+    "rama_base_nota": "develop es la rama por defecto del repo y la base de TODO worktree y rama de trabajo. main solo recibe de develop en release, a mano, fuera del enjambre.",
+    "prefijos_rama": ["feature/", "fix/", "docs/", "chore/"],
+    "issues_repo": "alejodelosrios/kelpie",
+    "issues_escribibles": true,
+    "issues_nota": "53 issues ya enriquecidos (Contexto/Alcance/Criterios binarios/Referencias file:line/Skills) + 7 milestones M0-M6, materializados desde roadmap/issues/*.md por scripts/gh-roadmap.sh. Esa precondición es lo que habilita bajar el PM hijo del fleet a Sonnet."
+  },
+
+  "merge_gate": "pr-a-develop",
+  "ci_verde_requerido": true,
+  "ci_nota": "Repo público => Actions ilimitadas y rulesets disponibles en plan Free. El ruleset 'protege-develop-y-main' (id 21614336) exige PR + check 'build' verde + strict (rama al día, fuerza rebase) y prohíbe force-push y borrado en develop y main. El CI verde NO depende de que el PM se acuerde: lo bloquea GitHub. required_approving_review_count=0 porque es un repo de un solo dueño: el gate humano es que él mismo mergea.",
+
+  "ramas_sobreviven_fleet": false,
+
+  "aislamiento": {
+    "modo": "worktree",
+    "runtime": "herdr",
+    "base": "develop",
+    "provisioning": [],
+    "provisioning_nota": "VACÍO A PROPÓSITO. .claude/ y .opencode/ van versionados, así que el worktree nace con comandos, agentes y skills. Zig regenera .zig-cache/ y zig-out/, y las deps van al cache global de Zig. No hay .env ni secretos de proyecto: la API key de MiMo vive en la config global de OpenCode. Cero symlinks."
+  },
+
+  "comandos": {
+    "kelpie-flow": "Un issue de punta a punta. 8 fases, dos gates humanos (diseño y merge). Fail-safe: con >=2 issues redirige a fleet.",
+    "kelpie-fleet": "Varios issues en paralelo, un worktree + pane de Herdr por issue. Admisión derivada (dependencias + territorio), plan de olas aprobado por el humano, listener persistente, cierre de worktrees e issues.",
+    "kelpie-issue": "Crea/audita issues con el formato que el enjambre exige y sus labels.",
+    "kelpie-research": "Investigación (bug / incógnita / feature) -> expediente verificado + issues enjambre-listos. Manufactura la precondición del fleet para todo lo que nazca fuera del roadmap."
+  },
+
+  "spec": {
+    "sistema": "ninguno (OpenSpec descartado por el dueño: quiere avanzar rápido)",
+    "sustituto": "roadmap/designs/<N>-<slug>.md — un archivo por issue con Spec + tabla de firmas de API citadas y verificadas + escenarios Gherkin + riesgos. Aprobado por el humano ANTES del Apply.",
+    "por_que": "El gate de diseño es el gate barato: corregir el plan cuesta un mensaje, corregir el Apply cuesta builder + QA + auditor. Y los escenarios Gherkin son el contrato único que QA ejecuta y el auditor usa de vara: sin ellos, cada rol inventa su propio criterio."
+  },
+
+  "agentes": {
+    "core-builder": { "motor": "opencode", "model": "mimo/mimo-v2.5-pro", "temperature": 0.0, "mode": "primary", "territorio": ["src/terminal/", "src/rpc/", "src/pty/", "src/ssh/", "src/font/"], "labels": ["area:vt", "area:render", "area:pty", "area:rpc", "area:ssh", "area:font"], "fallback": ".claude/agents/core-builder-fallback.md (sonnet)" },
+    "ui-builder": { "motor": "opencode", "model": "mimo/mimo-v2.5-pro", "temperature": 0.0, "mode": "primary", "territorio": ["src/ui/", "src/omarchy/", "PKGBUILD", ".github/"], "labels": ["area:ui", "area:omarchy", "area:pkg"], "fallback": ".claude/agents/ui-builder-fallback.md (sonnet)" },
+    "docs-writer": { "motor": "opencode", "model": "mimo/mimo-v2.5-pro", "temperature": 0.1, "mode": "primary", "territorio": ["docs/", "README.md", "CHANGELOG.md"], "fallback": "el PM lo escribe" },
+    "qa": { "motor": "claude", "model": "sonnet", "contrato": "un test o un guion manual por cada escenario Gherkin; el test debe poder fallar" },
+    "auditor": { "motor": "claude", "model": "opus", "contrato": "veredicto binario APROBADO/DENEGADO, máx 2 iteraciones" }
+  },
+
+  "tiering": {
+    "orquestador_fleet": { "model": "opus", "por_que": "juicio de scope y aprobación de los gates de los hijos" },
+    "pm_hijo": { "model": "sonnet", "por_que": "los issues vienen completamente enriquecidos: ejecuta una spec acotada, no diseña en abierto. Escape hatch: el orquestador sube a Opus un issue genuinamente ambiguo." },
+    "auditor": { "model": "opus", "por_que": "backstop de seguridad antes del merge; NUNCA se recorta por costo" },
+    "builders": { "model": "mimo-v2.5-pro", "por_que": "el volumen del Apply, con el gate mecánico de zig build y el contrato de citas como red" }
+  },
+
+  "verificacion": {
+    "orden": ["zig fmt --check + zig build + zig build test", "contrato de citas: sed -n sobre cada archivo:línea reportado", "git diff real contra el diseño aprobado", "QA (Gherkin)", "auditoría adversaria Opus"],
+    "regla": "El reporte del builder NUNCA es evidencia. Una cita falsa rechaza el diff AUNQUE COMPILE: ese es el fallo peligroso de un modelo externo en este stack — código que compila usando una API que el modelo creyó recordar.",
+    "fallback": "Build roto 2 veces, cita falsa o diff insatisfactorio -> git checkout -- . y relanzar con el subagente Claude equivalente. Dos fallbacks seguidos en el mismo issue = el problema es la spec, se para y se escala al humano."
+  },
+
+  "territorios_disjuntos": true,
+  "territorios_nota": "OpenCode no bloquea archivos entre procesos: dos builders sobre el mismo archivo, el segundo pisa al primero SIN error. Por eso el corte core/ui es duro y un issue que cruza territorio (p.ej. #35 ssh+ui) se secuencia, nunca se paraleliza.",
+
+  "hotspots": {
+    "archivos": ["build.zig", "src/main.zig", "src/app.zig"],
+    "mecanismo": "lease, no bloqueo",
+    "nota": "Predichos, no medidos: el repo tiene un solo commit de bootstrap. Revisar tras M1 con datos reales de qué toca cada dominio."
+  },
+
+  "ledgers": { "CONCERNS.md": "append-only, solo el PM escribe" },
+
+  "gotchas_criticos": [
+    "El provider `mimo` NO está en ~/.config/opencode/opencode.json (la migración de TUI lo borró; el .bak tampoco lo tiene). Sin él, `opencode run --agent X` cae EN SILENCIO al agente `build` con otro modelo. Hay que re-declararlo antes del primer Apply.",
+    "mode: subagent en un agente invocado con `opencode run --agent` = fallback silencioso. Los tres builders son mode: primary. El flow hace smoke test y confirma la línea de estado antes de cada Apply.",
+    "Un spike que falla su criterio binario NO se improvisa: se para y se informa (ADR-0001, escalera de fallback).",
+    "Los gates visuales abren ventana en la sesión Wayland del humano: el fleet no los paraleliza."
+  ],
+
+  "guia_fuente": "~/.claude/docs/kelpie-swarm-guia.md",
+  "guia_vault": "~/Documents/Obsidian/MY_NOTES/Personal/kelpie-swarm-guia.md",
+
+  "notas_variacion": "Sin OpenSpec (decisión del dueño: velocidad). Sin CodeGraph (no está instalado en la máquina). Sin ledger DEPRECATED (repo nuevo, nada que deprecar todavía). Sin cloud: la app es GTK sobre Wayland y sus gates exigen la máquina local."
+}
