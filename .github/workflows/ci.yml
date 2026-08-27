@@ -11,5 +11,6 @@ jobs:
       - run: pacman -Syu --noconfirm --needed zig git
       - uses: actions/checkout@v4
       - run: zig fmt --check build.zig build.zig.zon src
+      - run: zig build --fetch
       - run: zig build --summary all
       - run: zig build test --summary all
