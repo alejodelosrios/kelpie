@@ -38,6 +38,16 @@ test "terminal init/deinit no leak" {
     try std.testing.expectEqual(@as(u16, 24), t.rows);
 }
 
+test "terminal dimensions come from Options, not a hardcoded 80x24" {
+    var t: ghostty_vt.Terminal = try .init(std.testing.io, std.testing.allocator, .{
+        .cols = 40,
+        .rows = 12,
+    });
+    defer t.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(u16, 40), t.cols);
+    try std.testing.expectEqual(@as(u16, 12), t.rows);
+}
+
 test "version is valid semver" {
     _ = try std.SemanticVersion.parse(version);
 }
