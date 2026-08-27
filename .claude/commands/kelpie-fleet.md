@@ -145,6 +145,31 @@ y el ruleset les exigirá rebase. Avísales en cuanto pase; no esperes a que su 
 **No mates a un hijo por reloj.** Un QA visual riguroso tarda. Mata por **falta de progreso**: sin
 cambios en su diff ni en su pane durante varios ciclos, no por minutos transcurridos.
 
+## FASE 3b — La regla de merge del orquestador
+
+> ### 🔴 NADA SE MERGEA EN ROJO.
+>
+> El orquestador es quien ejecuta el `gh pr merge` cuando el humano lo autoriza, así que es **el
+> último filtro**. Antes de cada merge, comprueba las tres condiciones sobre el **head actual** de
+> la rama, no sobre un estado que leíste hace diez minutos:
+>
+> 1. `mergeStateStatus == CLEAN`,
+> 2. **todos** los checks en `SUCCESS` — ninguno `PENDING`/`IN_PROGRESS`,
+> 3. `0` commits detrás de `develop`.
+>
+> **Un `CLEAN` viejo miente.** Ocurrió en la Ola 1: el PR estaba `CLEAN`, se empujó un commit de
+> corrección de una cita, y ese push disparó un CI nuevo; el `CLEAN` que tenías en la mano era del
+> commit anterior y el merge rebotó contra el ruleset. Si vigilas con un `Monitor`, su condición de
+> salida debe exigir `CLEAN` **y** todos los checks concluidos en `SUCCESS`, nunca solo `CLEAN`.
+>
+> Y una autorización humana de merge (`"mergea 61"`) **no es una autorización a mergear en rojo**:
+> autoriza el merge de algo verde. Si al ir a ejecutarlo está rojo, se para y se informa — el humano
+> autorizó integrar trabajo terminado, no meter una rotura en `develop`.
+>
+> Cuando el CI de un hijo falle, **avísale con el log del fallo**, no solo con "está rojo":
+> `gh run view <id> --log-failed | tail -30`. Un fallo que solo aparece en el runner y no en local
+> es un hallazgo del ciclo y merece entrada en `lessons-learned.md`.
+
 ## FASE 4 — Cierre (nadie más lo hace)
 
 Por cada hijo que mergeó su PR:
