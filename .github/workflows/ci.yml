@@ -1,0 +1,15 @@
+name: ci
+on:
+  push:
+  pull_request:
+jobs:
+  build:
+    # Arch is the target platform (Omarchy); the container tracks exactly what users install.
+    runs-on: ubuntu-latest
+    container: archlinux:latest
+    steps:
+      - run: pacman -Syu --noconfirm --needed zig git
+      - uses: actions/checkout@v4
+      - run: zig fmt --check build.zig build.zig.zon src
+      - run: zig build --summary all
+      - run: zig build test --summary all

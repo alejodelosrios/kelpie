@@ -1,0 +1,7 @@
+M0 — Gate: spikes y bootstrap|Probar que el stack se sostiene antes de invertir. Cada spike tiene criterio binario. Si uno falla, se ejecuta el plan B del ADR-0001; no se improvisa.
+M1 — Consola local (v0.1 usable)|Cliente herdr + sidebar por urgencia + notificaciones Omarchy clickeables + tema en vivo. Attach abre Ghostty externo. Gate: uso diario en el dispositivo local sin el widget de terminal.
+M2 — Terminal embebido|Widget de terminal propio sobre el módulo Zig ghostty-vt: renderer Pango/GSK por filas sucias, PTY, teclado/ratón, selección y portapapeles. Gate: la vista de attach reemplaza a Ghostty externo.
+M3 — Multi-dispositivo|Túneles ssh -L con reconexión, alias de ~/.ssh/config, diagnóstico de forward silencioso, tintes de dispositivo. Gate: dos máquinas en el sidebar con notificaciones de ambas.
+M4 — Acabado visual|Sistema de diseño completo (métricas de herdrm), búsqueda difusa Ctrl+K, splits en la vista de attach, movimiento. Gate: prueba de aceptación visual (retematizar en vivo sin un color fuera de sitio).
+M5 — Integración Omarchy|Plugin de barra Quickshell, comando `kelpie setup`, .desktop/icono/reglas Hyprland, hooks theme-set/font-set, comportamiento con no-molestar. Gate: instalación limpia en una máquina Omarchy nueva en <2 min.
+M6 — Distribución|PKGBUILD offline para AUR, README con capturas, CHANGELOG, docs de arquitectura. Gate: `omarchy pkg aur add kelpie` instala y `kelpie setup` deja todo funcionando.
