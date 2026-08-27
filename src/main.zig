@@ -1,6 +1,7 @@
 const std = @import("std");
 const ghostty_vt = @import("ghostty-vt");
 const herdr_probe = @import("herdr/probe.zig");
+const spike_b = @import("ui/spike_b.zig");
 
 pub const name = "kelpie";
 // ponytail: duplicated from build.zig.zon on purpose; wire a build option when the version is set by CI.
@@ -13,9 +14,11 @@ pub fn main(init: std.process.Init) !void {
     const args = try init.minimal.args.toSlice(init.arena.allocator());
     var vt_info = false;
     var herdr_probe_flag = false;
+    var run_spike_b = false;
     for (args[1..]) |arg| {
         if (std.mem.eql(u8, arg, "--vt-info")) vt_info = true;
         if (std.mem.eql(u8, arg, "--herdr-probe")) herdr_probe_flag = true;
+        if (std.mem.eql(u8, arg, "--spike-b")) run_spike_b = true;
     }
 
     if (herdr_probe_flag) {
@@ -25,9 +28,9 @@ pub fn main(init: std.process.Init) !void {
             return;
         }
         return herdr_probe.run(init);
-    }
-
-    if (vt_info) {
+    } else if (run_spike_b) {
+        return spike_b.run();
+    } else if (vt_info) {
         var t: ghostty_vt.Terminal = try .init(init.io, init.gpa, .{
             .cols = 80,
             .rows = 24,

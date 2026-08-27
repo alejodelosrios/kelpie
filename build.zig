@@ -18,10 +18,39 @@ pub fn build(b: *std.Build) void {
         );
     }
 
+    // gobject: GTK4/libadwaita/Pango bindings for --spike-b, same lazy dependency and
+    // module mapping as Ghostty's apprt/gtk (SharedDeps.zig:713-731), plus the
+    // pango/pangocairo/cairo/gsk/graphene/gdkwayland modules this spike needs directly.
+    if (b.lazyDependency("gobject", .{ .target = target, .optimize = optimize })) |gobject| {
+        const gobject_imports = .{
+            .{ "adw", "adw1" },
+            .{ "gdk", "gdk4" },
+            .{ "gdkwayland", "gdkwayland4" },
+            .{ "gio", "gio2" },
+            .{ "glib", "glib2" },
+            .{ "glibunix", "glibunix2" },
+            .{ "gobject", "gobject2" },
+            .{ "gtk", "gtk4" },
+            .{ "gsk", "gsk4" },
+            .{ "graphene", "graphene1" },
+            .{ "pango", "pango1" },
+            .{ "pangocairo", "pangocairo1" },
+            .{ "cairo", "cairo1" },
+            .{ "xlib", "xlib2" },
+        };
+        inline for (gobject_imports) |import| {
+            const name, const module = import;
+            exe_mod.addImport(name, gobject.module(module));
+        }
+    }
+
     const exe = b.addExecutable(.{
         .name = "kelpie",
         .root_module = exe_mod,
     });
+    // libGL: plan-B GtkGLArea render callback calls glClearColor/glClear directly (no
+    // gobject binding for raw GL) — system library, not a new zig-pkg dependency.
+    exe_mod.linkSystemLibrary("GL", .{});
     b.installArtifact(exe);
 
     const run = b.addRunArtifact(exe);

@@ -8,7 +8,7 @@ jobs:
     runs-on: ubuntu-latest
     container: archlinux:latest
     steps:
-      - run: pacman -Syu --noconfirm --needed zig git
+      - run: pacman -Syu --noconfirm --needed zig git pkgconf gtk4 libadwaita pango
       - uses: actions/checkout@v4
       - run: zig fmt --check build.zig build.zig.zon src
       - run: zig build --fetch

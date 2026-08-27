@@ -9,6 +9,11 @@
             .url = "https://github.com/ghostty-org/ghostty/archive/15ff186f65ca0bdbd1fa397ab03908d59de16463.tar.gz",
             .hash = "ghostty-1.3.2-dev-5UdBC917UwUePbXuQu5o4Cdl5xMZUxKTWiTXuKlDDORa",
         },
+        .gobject = .{
+            .lazy = true,
+            .url = "https://deps.files.ghostty.org/gobject-2026-07-28-36-1.tar.zst",
+            .hash = "gobject-0.3.2-Skun7F6HogCMynX2JqeSHS7xr-8pK4ob-qRFIcEasVi3",
+        },
     },
     .paths = .{
         "build.zig",

@@ -11,8 +11,17 @@ Formato: `- [YYYY-MM-DD] #issue — qué se vio · por qué no se arregló ahora
 
 ---
 
-- [2026-08-27] #6 — `remaining_has_help_flag` en `/usr/share/omarchy/bin/omarchy:125-137` escanea
-  todo el remainder de argumentos buscando `-h`/`--help` y solo para en `--`; un argv de `--exec`
+- [2026-08-27] #3 — primer Apply de `ui-builder`/MiMo para el spike B compiló y pasó `zig fmt`/`zig
+  build`/`zig build test`, pero el diff era insatisfactorio: el tick callback nunca invalida el
+  widget (`queueDraw`), así que el contador de fps mide un bucle de tick ocioso, no el redibujado de
+  las 12.000 celdas que el spike existe para medir; y el shaping se hacía carácter por carácter
+  (`pango.itemize` con `length=1`), lo que hace estructuralmente imposible el escenario de ligaduras
+  del diseño (una ligadura necesita varios caracteres contiguos en un mismo run) · se descartó
+  (`git checkout --`) y se relanzó con `ui-builder-fallback` en vez de un tercer intento del externo,
+  porque el modelo ya había tardado ~48 min repartidos en dos invocaciones sin terminar ni su propia
+  tabla de citas · dispara si vuelve a pasar con el mismo builder en otro issue de render: puede ser
+  un patrón del modelo (itemizar por celda) más que un accidente puntual, vale la pena anotarlo en
+  la skill `zig-libghostty` si se repite.
   que contenga `-h` (flag propio de la app clickeada, o un nombre de archivo así) se traga como
   ayuda y la notificación nunca sale · el spike E se salvó por casualidad (su argv usa `-c`, no
   `-h`) y no entra en el alcance de este issue arreglarlo · dispara al diseñar #18: kelpie debe
