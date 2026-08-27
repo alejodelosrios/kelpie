@@ -26,7 +26,8 @@ activado, valor por defecto de `lazyDependency`).
 | `b.lazyDependency("ghostty", .{})` + `dep.module("ghostty-vt")` | `~/.cache/ghostty-build/src/ghostty/example/zig-vt/build.zig:19-29` | ✅ |
 | `ghostty_vt.Terminal.init(io_impl: std.Io, alloc: Allocator, opts: Options) !Terminal` | `~/.cache/ghostty-build/src/ghostty/src/terminal/Terminal.zig:311-314` | ✅ |
 | `Terminal.deinit(self: *Terminal, alloc: Allocator) void` | `~/.cache/ghostty-build/src/ghostty/src/terminal/Terminal.zig:356` | ✅ |
-| `Terminal.cols: size.CellCountInt` (`u16`) / `Terminal.rows: size.CellCountInt` | `~/.cache/ghostty-build/src/ghostty/src/terminal/Terminal.zig:267-268`, `size.zig:22` | ✅ |
+| `Terminal.rows: size.CellCountInt` (`u16`) / `Terminal.cols: size.CellCountInt` | `~/.cache/ghostty-build/src/ghostty/src/terminal/Terminal.zig:59-60`, `size.zig:22` | ✅ |
+| `Options.cols: size.CellCountInt` / `Options.rows: size.CellCountInt` (los que recibe `init`) | `~/.cache/ghostty-build/src/ghostty/src/terminal/Terminal.zig:267-268` | ✅ |
 | `pub const Terminal = terminal.Terminal;` (re-export público) | `~/.cache/ghostty-build/src/ghostty/src/lib_vt.zig:93` | ✅ |
 | `init.io`, `init.gpa` en `std.process.Init` (patrón del ejemplo oficial) | `~/.cache/ghostty-build/src/ghostty/example/zig-vt/src/main.zig:1-20` | ✅ |
 | `minimum_zig_version = "0.16.0"` del propio Ghostty (compatible con kelpie) | `~/.cache/ghostty-build/src/ghostty/build.zig.zon:6` | ✅ |
