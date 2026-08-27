@@ -12,8 +12,7 @@ const gtk = @import("gtk");
 const gdk = @import("gdk");
 const graphene = @import("graphene");
 const pango = @import("pango");
-const pangocairo = @import("pangocairo");
-const cairo = @import("cairo");
+const gsk = @import("gsk");
 
 pub const cols = 200;
 pub const rows = 60;
@@ -170,9 +169,7 @@ pub const GridWidget = extern struct {
         _ = graphene.Rect.init(&bounds, 0, 0, @floatFromInt(w), @floatFromInt(h));
         gtk.Snapshot.appendColor(snap, &.{ .f_red = 0, .f_green = 0, .f_blue = 0, .f_alpha = 1 }, &bounds);
 
-        const cr = gtk.Snapshot.appendCairo(snap, &bounds);
-        defer cairo.Context.destroy(cr);
-        cairo.Context.setSourceRgb(cr, 0.85, 0.85, 0.85);
+        const text_color: gdk.RGBA = .{ .f_red = 0.85, .f_green = 0.85, .f_blue = 0.85, .f_alpha = 1 };
 
         for (0..rows) |r| {
             const text: [*:0]const u8 = @ptrCast(&self.row_text[r]);
@@ -221,8 +218,18 @@ pub const GridWidget = extern struct {
 
                 const x = @as(f64, @floatFromInt(col)) * cell_w;
                 const y = (@as(f64, @floatFromInt(r)) + 1) * cell_h - cell_h * 0.25;
-                cairo.Context.moveTo(cr, x, y);
-                pangocairo.showGlyphString(cr, item.f_analysis.f_font.?, gs);
+                var offset: graphene.Point = undefined;
+                _ = graphene.Point.init(&offset, @floatCast(x), @floatCast(y));
+
+                // A real gsk.TextNode (not a Cairo raster node): appendCairo/
+                // showGlyphString painted glyphs through Cairo's software rasterizer,
+                // which is what the human-run fps gate flagged as the scaffolding bug.
+                // gsk_text_node_new takes the same already-shaped, width-forced
+                // pango.GlyphString and turns it into a genuine GSK render node.
+                if (gsk.TextNode.new(item.f_analysis.f_font.?, gs, &text_color, &offset)) |text_node| {
+                    gtk.Snapshot.appendNode(snap, text_node.as(gsk.RenderNode));
+                    gsk.RenderNode.unref(text_node.as(gsk.RenderNode));
+                }
 
                 col += @intCast(item.f_num_chars);
             }
