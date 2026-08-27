@@ -27,6 +27,7 @@ omarchy notification send --app-name kelpie -u critical -p \
   "spike-e argv" "click para volcar el argv" \
   --exec bash -c 'printf "%s\n" "$@" > "$0"' "$argv_file" "arg con espacios" '$(id)'
 echo "Toast enviada (urgencia critical, no expira sola)."
+sleep 1
 omarchy-shell notifications invokeLast >/dev/null
 if [[ ! -s $argv_file ]]; then
   echo "Click automático no disparó el archivo; haz click a mano en la toast."
@@ -87,6 +88,7 @@ echo
 echo "--- Escenario 4: no-molestar (DND) ---"
 dnd_original=$(omarchy-shell notifications isDnd)
 echo "  estado original de DND: $dnd_original"
+trap 'omarchy-shell notifications setDnd "$dnd_original" >/dev/null 2>&1' EXIT
 omarchy-shell notifications setDnd true >/dev/null
 omarchy notification send --app-name kelpie "spike-e dnd kelpie" "NO debería aparecer"
 sleep 1
@@ -108,14 +110,17 @@ echo
 
 # --- Escenario 5: glifo y urgencia se distinguen visualmente ---------------
 echo "--- Escenario 5: glifo y urgencia ---"
-omarchy notification send --app-name kelpie -g "" -u critical "spike-e urgency" "critical"
+glyph=$'\U000f088c'
+omarchy notification send --app-name kelpie -g "$glyph" -u critical "spike-e urgency" "critical"
 sleep 1
-omarchy notification send --app-name kelpie -g "" -u normal "spike-e urgency" "normal"
+omarchy notification send --app-name kelpie -g "$glyph" -u normal "spike-e urgency" "normal"
 if confirm "¿Se ve el glifo Nerd Font en las toasts, y 'critical' vs 'normal' se distinguen visualmente?"; then
   pass "glifo visible; critical y normal se distinguen"
 else
   fail "glifo ausente o critical/normal no se distinguen"
 fi
+# La toast critical no expira sola (Service.qml:99-102) — descártala explícito.
+omarchy-shell notifications dismiss "spike-e urgency" >/dev/null
 echo
 
 # --- Escenario 6: la toast sigue clickeable tras omarchy restart shell -----
