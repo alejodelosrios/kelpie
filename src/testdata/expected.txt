@@ -1,0 +1,3 @@
+ROW 0: "Hello, Kelpie!                          "
+ROW 1: "  X                                     "
+  CELL col=2 bold=true fg=palette:1
