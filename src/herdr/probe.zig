@@ -323,6 +323,14 @@ fn takeLine(r: *std.Io.Reader) ![]u8 {
     return line[0 .. line.len - 1];
 }
 
+// Zig's test runner only discovers `test` blocks in the root source file
+// plus whatever gets explicitly referenced from a `test {}` block — it does
+// NOT walk `@import`s transitively (verified against zig 0.16.0). Without
+// this, `client.zig`'s tests would silently never run under `zig build test`.
+test {
+    _ = client;
+}
+
 // ---------------------------------------------------------------------------
 // 5a. error: id not a string → invalid_request
 // ---------------------------------------------------------------------------

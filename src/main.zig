@@ -63,3 +63,12 @@ test "terminal dimensions come from Options, not a hardcoded 80x24" {
 test "version is valid semver" {
     _ = try std.SemanticVersion.parse(version);
 }
+
+// Zig's test runner only discovers `test` blocks in the root source file
+// plus whatever a `test {}` block explicitly references — it does not walk
+// `@import`s transitively (verified against zig 0.16.0). Without this,
+// herdr/probe.zig's and herdr/client.zig's tests would silently never run
+// under `zig build test`.
+test {
+    _ = herdr_probe;
+}
