@@ -250,7 +250,7 @@ fn demoAgentList(io: Io, socket_path: []const u8, gpa: std.mem.Allocator, stdout
     // the `.integer` case is a slice into this buffer, and it must still be
     // valid at the `print` below — an `int_buf` declared inside the `blk:`
     // scope would close before that use, the same class of dangling-slice UB
-    // this issue was opened to fix (see `docs/adr` note in the fix report).
+    // as the Connection.open buffer-lifetime bug this issue's Apply hit.
     var int_buf: [32]u8 = undefined;
     for (agents.array.items) |agent| {
         const pane_id = agent.object.get("pane_id") orelse .null;
