@@ -8,11 +8,12 @@ permission:
   edit: allow
   bash: allow
   task: deny
-  # El mirror pinneado de Ghostty vive FUERA del proyecto y es la única fuente de verdad de las
-  # firmas: sin este permiso el builder no puede citar y acaba escribiendo de memoria.
-  external_directory:
-    "/home/alejodelosrios/.cache/ghostty-build/**": allow
-    "*": ask
+  # OpenCode auto-rechaza en headless todo acceso fuera del cwd. Sin esto el builder no puede LEER
+  # el mirror pinneado de Ghostty — su única fuente de firmas — y acaba escribiendo de memoria.
+  # Va en forma simple (allow), no como mapa de patrones: el mapa se probó y la herramienta Read
+  # siguió rechazada. La contención real no es este permiso (bash ya alcanza cualquier ruta): es el
+  # territorio declarado abajo, el diff que revisa el PM y el auditor.
+  external_directory: allow
 ---
 
 # Rol

@@ -8,13 +8,12 @@ permission:
   edit: allow
   bash: allow
   task: deny
-  # Fuentes de verdad fuera del proyecto: el mirror pinneado de Ghostty (runtime GTK4 real) y
-  # /usr/share/omarchy (la documentación real de Omarchy). Ambas SOLO LECTURA por convención:
-  # escribir en /usr/share/omarchy está prohibido y lo verifica el auditor.
-  external_directory:
-    "/home/alejodelosrios/.cache/ghostty-build/**": allow
-    "/usr/share/omarchy/**": allow
-    "*": ask
+  # OpenCode auto-rechaza en headless todo acceso fuera del cwd. Sin esto el builder no puede LEER
+  # el mirror de Ghostty (runtime GTK4 real) ni /usr/share/omarchy (la documentación real de
+  # Omarchy) — sus dos fuentes de verdad. Va en forma simple (allow), no como mapa de patrones: el
+  # mapa se probó y la herramienta Read siguió rechazada. Escribir en /usr/share/omarchy sigue
+  # PROHIBIDO por contrato y lo verifica el auditor.
+  external_directory: allow
 ---
 
 # Rol
