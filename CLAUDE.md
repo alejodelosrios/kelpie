@@ -54,8 +54,13 @@ acuerde.
 Dos puertas: **`/kelpie-flow <N>`** para un issue, **`/kelpie-fleet <N> <M> …`** para varios (el flow
 te redirige si le pasas más de uno). Helpers: `/kelpie-issue` y `/kelpie-research`.
 
-Pipeline: contexto → scope gate → **diseño + Gherkin (🛑 gate humano)** → Apply → verificación → QA →
-auditoría adversaria → docs + PR + CI verde (🛑 gate humano) → cierre.
+Pipeline: contexto → scope gate → diseño + Gherkin → Apply → verificación → QA →
+auditoría adversaria → docs + PR + CI verde (🛑 **gate humano: el merge**) → cierre.
+
+Los gates de scope y de diseño **los aprueba el PM** — el issue viene enriquecido, así que el diseño
+traduce un contrato ya aceptado. **El gate humano es el merge**, más lo que se escala siempre: un
+spike que falla su criterio binario, una contradicción issue/código, un auditor que deniega dos
+veces.
 
 **Este repo no usa OpenSpec.** El contrato de cada issue es un archivo en `roadmap/designs/<N>-*.md`
 con spec, firmas citadas y escenarios Gherkin, aprobado **antes** de escribir código.

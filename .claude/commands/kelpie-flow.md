@@ -73,13 +73,21 @@ git switch -c <prefijo>/<N>-<slug> origin/develop     # feature|fix|docs|chore
 
 **DETENTE. El humano aprueba el diseño antes de que se escriba una línea de código.** Este es el
 gate barato: corregir el plan cuesta un mensaje, corregir el Apply cuesta el ciclo entero.
-**El gate de diseño es del humano SIEMPRE, también como hijo del fleet** (CLAUDE.md, pipeline:
-`diseño + Gherkin (🛑 gate humano)`). El orquestador aprueba el **scope gate**, no este. Un
-orquestador aprobándose a sí mismo el contrato del issue borra el único punto donde una spec
-equivocada sale gratis.
+**El gate de diseño lo aprueba el PM, no el humano.** Para eso el issue viene **enriquecido**: el
+recorte de alcance ya se negoció ahí, así que el diseño es la traducción de un contrato que el humano
+ya aceptó — no una decisión nueva. El PM investiga, valida las citas por su cuenta y aprueba.
 
-Al aprobar, estampa `Aprobado por: <humano> · <fecha>` en la cabecera del diseño — el template nace
-como `PENDIENTE DE APROBACIÓN` a propósito. Commitea el diseño ya aprobado antes del Apply.
+**El único gate humano es el MERGE a `develop`.** Ahí se prueba lo construido antes de juntarlo. Un
+gate humano por cada diseño convierte al humano en cuello de botella de tres hijos en paralelo, que
+es exactamente lo que el fleet existe para evitar.
+
+Se escala al humano, en cualquier fase: un spike que **falla su criterio binario**, una
+contradicción entre el issue y el código, un auditor que DENIEGA dos veces, y todo merge.
+
+Al aprobar, estampa en la cabecera quién aprobó de verdad: `Aprobado por: orquestador PM
+(/kelpie-flow) · <fecha>`, o el nombre del humano **solo** si fue él quien lo miró. El template nace
+como `PENDIENTE DE APROBACIÓN` a propósito: firmar por alguien que no lo vio es un registro falso.
+Commitea el diseño ya aprobado antes del Apply.
 
 ## FASE 4 — Apply (OpenCode + MiMo v2.5-pro)
 
