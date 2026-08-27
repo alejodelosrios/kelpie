@@ -161,7 +161,8 @@
     "nota": "Predichos, no medidos: el repo tiene un solo commit de bootstrap. Revisar tras M1 con datos reales de qué toca cada dominio."
   },
   "ledgers": {
-    "CONCERNS.md": "append-only, solo el PM escribe"
+    "CONCERNS.md": "deuda del producto. Append-only, solo el PM escribe.",
+    "lessons-learned.md": "memoria del enjambre: lo que hizo fallar un ciclo + la regla que lo evita. Append-only, solo el PM. Tres anclajes obligatorios: el PM lo lee en FASE 1, el auditor cruza el diff contra él en FASE 7, el PM escribe la lección en FASE 8; el orquestador del fleet consolida lo que solo se ve a nivel de ola. La frontera importa: deuda de producto va a CONCERNS, conocimiento del stack va a las skills, y aquí solo el proceso. Un ledger que nadie relee es peor que no tenerlo."
   },
   "gotchas_criticos": [
     "PERMISOS FUERA DEL PROYECTO: OpenCode auto-rechaza en headless el acceso fuera del cwd (permiso `external_directory`). Sin abrirlo, los builders no pueden LEER el mirror pinneado de Ghostty — su única fuente de firmas — y escriben de memoria, que es el fallo que este enjambre existe para evitar. Se probó primero un mapa pattern->allow y NO sirve: bash pasaba (su parser no resuelve `~`, así que ni pide permiso) pero la herramienta Read seguía rechazada, dejando al builder con media fuente de verdad, que es peor que ninguna porque parece que funciona. Va en forma simple `external_directory: allow`. La contención real no es ese permiso (bash ya alcanza cualquier ruta) sino el territorio declarado, el diff que revisa el PM y el auditor.",

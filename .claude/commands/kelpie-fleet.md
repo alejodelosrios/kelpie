@@ -142,5 +142,10 @@ Al final: `git worktree list` y `gh issue list --state open` para confirmar que 
 worktrees huérfanos ni issues abiertos de trabajo ya mergeado. Un fleet sin cierre deja basura que
 el siguiente fleet hereda.
 
-Resume al humano: qué mergeó, qué quedó pendiente y por qué, qué entró en `CONCERNS.md`, y qué
-aprendiste que ya está en las skills.
+**Consolida las lecciones de la ola en `lessons-learned.md`.** Cada hijo escribe las suyas, pero tú
+ves lo que ninguno ve: lo que le pasó a **varios** a la vez —el mismo fallo en dos worktrees, un gate
+que aprobaste quince veces, una colisión que el plan de olas no predijo, una instrucción tuya que
+permitía el fallo—. Eso es una lección del enjambre, no del issue, y solo tú puedes escribirla.
+
+Resume al humano: qué mergeó, qué quedó pendiente y por qué, qué entró en `CONCERNS.md`, qué lección
+quedó en `lessons-learned.md`, y qué aprendiste que ya está en las skills.

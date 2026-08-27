@@ -30,6 +30,9 @@ Argumento: `$ARGUMENTS` — número(s) de issue de `alejodelosrios/kelpie`.
    15ff186f65ca0bdbd1fa397ab03908d59de16463` antes de seguir. **Sin mirror no hay Apply**: es la
    única fuente de verdad de las firmas y sin ella el builder alucina.
 5. Lee SOLO los archivos que el issue nombra. Nada de volcar el repo.
+5b. **Lee `lessons-learned.md`.** Es la memoria del enjambre: lo que ya hizo fallar un ciclo. Si
+   alguna fila toca el territorio, el motor o el tipo de cambio de este issue, dilo en el scope gate
+   y hazla explícita en el diseño. Un ledger que no se relee es peor que no tenerlo.
 6. Escribe el state file `.claude/state/<N>.json`:
    `{"issue":N,"fase":1,"rama":null,"worktree":null,"design":null,"intentos_apply":0,"pr":null}`.
    Actualízalo al entrar en cada fase — es lo que permite reanudar.
@@ -169,19 +172,28 @@ Veredicto **binario**: `APROBADO` o `DENEGADO` con lista de hallazgos. Busca lo 
 memoria (allocator, `defer`, fugas), `unreachable` en camino de error, concurrencia (el mutex del
 terminal, pintar desde el hilo lector), APIs inventadas que el compilador aceptó por coincidencia,
 y escritura en `/usr/share/omarchy/` (prohibido).
+Pásale también `lessons-learned.md`: una de sus tareas es **cruzar el diff contra el ledger**
+—¿este cambio repite algo que ya falló?—. Es el rol con más incentivo para encontrarlo.
+
 **Máximo 2 iteraciones.** Si a la segunda sigue DENEGADO, para y escala al humano.
 
 ## FASE 8 — Docs, PR y merge gate  🛑 GATE HUMANO
 
 1. Si el cambio altera arquitectura o una decisión irreversible → ADR nuevo en `docs/adr/`.
    Docs de usuario → `docs-writer`.
-2. Commit convencional que explica el **por qué**, no el qué.
-3. `git push -u origin <rama>` y `gh pr create --base develop --fill --body "Cierra #<N>."`
+2. **Si el ciclo enseñó algo, escribe la lección** en `lessons-learned.md` — antes del commit, para
+   que viaje en este PR (a `develop` no se commitea suelto: el ruleset no lo permite). Fecha, issue,
+   tipo, qué falló y **la regla que lo evita**: un fallback que se disparó, una verificación que no
+   atrapó lo que debía, una cita falsa, un gate mal planteado, una instrucción que **permitía** el
+   fallo. No entra deuda del producto (eso es `CONCERNS.md`) ni conocimiento del stack (eso va a las
+   skills). Si el ciclo salió limpio, no inventes una lección: un ledger inflado no se relee.
+3. Commit convencional que explica el **por qué**, no el qué.
+4. `git push -u origin <rama>` y `gh pr create --base develop --fill --body "Cierra #<N>."`
    con el diseño enlazado y el veredicto del auditor en el cuerpo.
-4. **Espera el CI**: `gh pr checks --watch`. El ruleset de GitHub bloquea el merge sin `build` verde
+5. **Espera el CI**: `gh pr checks --watch`. El ruleset de GitHub bloquea el merge sin `build` verde
    y exige la rama al día con `develop` — si pide rebase, rebasea.
-5. **DETENTE. El merge lo aprueba el humano.** Es el gate final del dueño.
-6. Tras el merge: `gh issue close <N>`, borra la rama, y si corrías en worktree,
+6. **DETENTE. El merge lo aprueba el humano.** Es el gate final del dueño.
+7. Tras el merge: `gh issue close <N>`, borra la rama, y si corrías en worktree,
    `git worktree remove` (lo hace el orquestador del fleet). Cierra el state file.
 
 `main` no se toca desde aquí: solo recibe de `develop` en release, a mano, fuera del enjambre.

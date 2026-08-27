@@ -1,0 +1,37 @@
+# Lecciones aprendidas — la memoria del enjambre
+
+Append-only. **Solo el PM escribe aquí** (`/kelpie-flow`, `/kelpie-fleet`).
+
+Qué entra: lo que hizo **fallar o casi fallar un ciclo del enjambre** y la regla que evita que vuelva
+a pasar. Errores de proceso, de verificación, de delegación, de configuración del motor.
+
+Qué NO entra:
+- Deuda del producto → `CONCERNS.md`.
+- Conocimiento del stack (firmas, rutas de Omarchy, contratos de API) → las skills de
+  `.claude/skills/`, que es donde el builder las va a buscar.
+
+**Un ledger que nadie relee es peor que no tenerlo**: da sensación de memoria. Por eso tiene tres
+anclajes obligatorios en el pipeline, y ninguno es opcional:
+
+| Cuándo | Quién | Qué hace |
+|---|---|---|
+| FASE 1 (contexto) | PM | lo lee antes de diseñar |
+| FASE 7 (auditoría) | auditor | cruza el diff contra el ledger: ¿esto ya pasó? |
+| FASE 8 (cierre) | PM | escribe la lección si el ciclo enseñó algo |
+
+Y una regla de búsqueda, aprendida cara en otro repo: **cuando algo falle, grepea los workarounds,
+no el síntoma.** Un parche que nombra a su causa es un diagnóstico que alguien ya pagó — y cruza
+vocabularios, que es justo donde la búsqueda por síntoma falla.
+
+---
+
+| Fecha | Issue / fase | Tipo | Qué falló | Regla nueva |
+|---|---|---|---|---|
+| 2026-08-26 | montaje del enjambre | **Motor / permisos** | Los builders de OpenCode leían el mirror pinneado por `grep` pero la herramienta `Read` era auto-rechazada (`external_directory`). El builder tenía **media fuente de verdad**, que es peor que ninguna: parece que funciona y el modelo rellena el hueco de memoria. Peor aún, `grep` pasaba **no por autorizado** sino porque el parser de OpenCode no resuelve `~` y ni siquiera pide permiso. | Un smoke test de conectividad (`responde PONG`) **no prueba acceso a la fuente de verdad**. Antes de confiar en un builder externo, correr una tarea que **lea y cite** el material pinneado con la herramienta `Read`, y verificar la cita con `sed`. El permiso `external_directory` va en forma simple (`allow`): el mapa de patrones no lo honra `Read`. |
+| 2026-08-26 | montaje del enjambre | **Motor / config** | El provider `mimo` había desaparecido de la config global de OpenCode (se lo llevó una migración de TUI; ni el `.bak` lo tenía). Sin él, `opencode run --agent X` **no falla**: cae en silencio al agente `build` con otro modelo. | Antes de cada Apply, confirmar en la línea de estado el **agente y el modelo** (`> core-builder · mimo-v2.5-pro`). Nunca fiarse del modelo que el agente dice ser. Si el provider falta, replicarlo desde la máquina que lo tenga (host ssh `m2`) — no improvisar con otro modelo. |
+| 2026-08-26 | montaje del enjambre | **Fleet / vigilancia** | MiMo tardó ~8 min en una tarea de **solo lectura** sobre el mirror. Con un reloj como criterio, un hijo sano se mata por lento. | En el fleet se mata por **falta de progreso** (sin cambios en el diff ni en el pane), nunca por minutos transcurridos. Y distinguir *esperando a un subagente* (activo) de *esperándote a TI* (idle bloqueado). |
+| 2026-08-27 | #6 spike E | **Spikes / diagnóstico** | El spike falló dos veces al principio, pero el fallo estaba en el **script del spike**, no en el mecanismo bajo prueba (el `--exec` de Omarchy funcionaba). Un veredicto apresurado habría disparado la escalera de aborto del ADR-0001 contra un mecanismo sano. | Antes de declarar que un spike **falla su criterio binario**, aislar harness y mecanismo: demostrar que el fallo persiste con el harness reducido a lo mínimo. La escalera de aborto del ADR es cara — se invoca contra el mecanismo, nunca contra el andamio. |
+| 2026-08-27 | Ola 1 M0 (#2, #6) | **Fleet / lanzamiento** | Un pane con `agent_status: unknown` **no es un pane libre**: puede tener lazygit o un pager abierto, y `pane run` entra como teclas dentro de esa TUI. Y aunque el pane sea una shell, `pane run` **tipea** el slash-command pero no lo envía dentro de Claude: el hijo se queda con el comando escrito en el prompt. Se perdió el primer lanzamiento de #2. | Comprobar con `herdr pane process-info` antes de reutilizar un pane; si no es una shell, abrir uno nuevo con `pane split --cwd`. Rematar **siempre** el slash-command con `send-keys Enter` y confirmar por `pane read` que hay spinner o FASE 1. Un `%` de contexto que no crece es un hijo que no arrancó. |
+| 2026-08-27 | Ola 1 M0 (#2, #6) | **Fleet / vigilancia** | Vigilar "a ojo" falló: los dos hijos llegaron al scope gate en ~2 min y se quedaron callados hasta que el humano lo notó. | El listener **se arma, no se recuerda**: un `Monitor` persistente sobre `agent_status` en cuanto los panes corren. Cubrir los tres finales, no solo el feliz — `idle` (te espera), `blocked`/`done`, y `unknown` (el hijo murió). Vigilando solo el merge, un hijo caído se ve idéntico a un hijo pensando. |
+| 2026-08-27 | Ola 1 M0 (#2, #6) | **Gates / autoridad** | El `flow` autorizaba al orquestador a aprobarse el **gate de diseño**, contradiciendo el pipeline de `CLAUDE.md` (`🛑 gate humano`). Los dos hijos, además, estamparon nombre y fecha del humano en diseños que aún no había visto, porque el template nacía pre-rellenado. | El gate de diseño es del **humano siempre**, también como hijo del fleet; el orquestador aprueba el **scope gate**, no ese. Un orquestador aprobándose el contrato del issue borra el único punto donde una spec equivocada sale gratis. Los campos de aprobación nacen como `PENDIENTE DE APROBACIÓN`: un artefacto no se pre-firma. |
+| 2026-08-27 | Ola 1 M0 (#2) | **Delegación / territorios** | `build.zig`, `build.zig.zon`, `src/main.zig` y `src/app.zig` no caían en ninguna carpeta de la tabla de territorios. #2 tocaba **solo** hotspots, así que se quedó sin builder declarado y el PM escribió el Apply él mismo con `intentos_apply: 0` — sin desobedecer ninguna instrucción. | Todo archivo que el enjambre pueda tocar necesita **dueño explícito**, hotspots incluidos (aquí: `core-builder`). Un hueco en la tabla de territorios no se lee como "pregunta", se lee como "hazlo tú". Y `intentos_apply: 0` en un issue con código es un Apply que nunca ocurrió: el PM lo rechaza y lo manda al builder. |

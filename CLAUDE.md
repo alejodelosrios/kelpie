@@ -77,7 +77,10 @@ peligroso con un modelo externo: código que compila usando una API que el model
 Territorios **disjuntos**: dos builders nunca tocan el mismo archivo. Un issue que cruza territorio se
 secuencia (core primero, verificar, commitear, luego ui).
 
-Preocupaciones que no bloquean → `CONCERNS.md` (append-only, solo el PM escribe).
+Dos ledgers append-only que solo el PM escribe, con fronteras distintas:
+`CONCERNS.md` = deuda del **producto**. `lessons-learned.md` = lo que hizo fallar un **ciclo del
+enjambre**, con la regla que lo evita — el PM lo lee en FASE 1 y el auditor cruza el diff contra él.
+El conocimiento del **stack** (firmas, rutas) no va a ningún ledger: va a las skills.
 
 ## YAGNI
 
