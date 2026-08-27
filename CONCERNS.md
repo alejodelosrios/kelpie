@@ -32,3 +32,11 @@ Formato: `- [YYYY-MM-DD] #issue — qué se vio · por qué no se arregló ahora
 - [2026-08-27] #2 — segundo test en `src/main.zig` (dimensiones no-hardcodeadas) es casi redundante
   con el primero · se dejó porque descarta un caso real de API que ignora `Options` · no dispara nada,
   aceptado como está.
+- [2026-08-27] #4 — `core-builder` (OpenCode+MiMo) falló el Apply dos veces seguidas con el mismo
+  diseño: intento 1 (`timeout 900`) y intento 2 (`timeout 1800`) terminaron en `exit 124` sin escribir
+  ni un archivo y sin volcar salida al log · no se investigó la causa raíz en este ciclo (podría ser
+  el tamaño del prompt — el diseño completo va inline — o un cuelgue de MiMo con esta tarea concreta)
+  porque el fallback a `core-builder-fallback` (Claude) resuelve el issue sin bloquear más tiempo ·
+  dispara si vuelve a pasar en otro issue: investigar si el prompt necesita ir por archivo en vez de
+  inline, y medir si el límite real de MiMo en esta máquina es más bajo que 30 min para tareas de
+  escritura+build.
