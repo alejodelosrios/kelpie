@@ -164,7 +164,7 @@
     "CONCERNS.md": "append-only, solo el PM escribe"
   },
   "gotchas_criticos": [
-    "PERMISOS FUERA DEL PROYECTO: OpenCode bloquea por defecto la lectura fuera del cwd (permiso `external_directory`, auto-rechazado en modo headless). Sin abrirlo, los builders NO pueden leer el mirror pinneado de Ghostty — es decir, se quedan sin la única fuente de firmas y escriben de memoria, que es exactamente el fallo que este enjambre existe para evitar. Cada builder lo tiene abierto SOLO a su fuente: core al mirror, ui al mirror y a /usr/share/omarchy. Verificado con un test de citas real, no en teoría.",
+    "PERMISOS FUERA DEL PROYECTO: OpenCode auto-rechaza en headless el acceso fuera del cwd (permiso `external_directory`). Sin abrirlo, los builders no pueden LEER el mirror pinneado de Ghostty — su única fuente de firmas — y escriben de memoria, que es el fallo que este enjambre existe para evitar. Se probó primero un mapa pattern->allow y NO sirve: bash pasaba (su parser no resuelve `~`, así que ni pide permiso) pero la herramienta Read seguía rechazada, dejando al builder con media fuente de verdad, que es peor que ninguna porque parece que funciona. Va en forma simple `external_directory: allow`. La contención real no es ese permiso (bash ya alcanza cualquier ruta) sino el territorio declarado, el diff que revisa el PM y el auditor.",
     "El provider `mimo` no estaba en esta máquina Linux (la migración de TUI borró ~/.config/opencode/opencode.json). Se replicó desde la Mac (host ssh `m2`): baseURL de Xiaomi + key, en ~/.config/opencode/opencode.jsonc con chmod 600. El bloque `mcp` de la Mac (codegraph/supabase/playwright) NO se copió: codegraph no está instalado aquí y ninguno hace falta para kelpie. La key vive en texto plano en la config global (fuera de todo repo) — si se expone, se rota.",
     "mode: subagent en un agente invocado con `opencode run --agent` = fallback silencioso al agente `build`. Los tres builders son mode: primary. Smoke test verificado 2026-08-26: los tres responden `> <agente> · mimo-v2.5-pro`.",
     "Un spike que falla su criterio binario NO se improvisa: se para y se informa (ADR-0001, escalera de fallback).",
@@ -182,6 +182,8 @@
       "mimo-v2.5",
       "mimo-v2-pro",
       "mimo-v2-omni"
-    ]
+    ],
+    "contrato_de_citas": "Verificado end-to-end el 2026-08-26: core-builder localizó por su cuenta el iterador de filas sucias en el mirror y citó include/ghostty/vt/render.h:624 (ghostty_render_state_row_iterator_next_dirty) y lib_vt.zig:295-296,303. El PM verificó la cita con sed contra la fuente: exacta, incluida la semántica (NULL devuelve false, no limpia dirty state).",
+    "latencia_observada": "~8 min una tarea de solo lectura sobre el mirror. El Apply real no es cuestión de segundos: en fleet se mata por falta de progreso, nunca por reloj."
   }
 }
