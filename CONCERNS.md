@@ -54,3 +54,9 @@ Formato: `- [YYYY-MM-DD] #issue — qué se vio · por qué no se arregló ahora
   celda queda "stale" por diseño (`render.zig:373-378`) y `update()` sostendría el lock durante la
   denormalización de estilos · no aplica a este spike (sin hilos) · dispara al diseñar el widget de
   render en M2: usar las dos fases explícitas, nunca `update()`.
+- [2026-08-27] #5 — `takeLine` (recorta el `\n` que `takeDelimiterInclusive` no descarta solo) está
+  duplicado literal en `src/herdr/client.zig` (tests) y `src/herdr/probe.zig` (producción) · no se
+  dedupó porque son 4 líneas en un spike, YAGNI legítimo — la deduplicación es mecánicamente trivial
+  (`probe.zig` ya importa `client.zig`, sin ciclo posible: `client.zig` no importa nada del repo salvo
+  `std`) — cualquier nota que diga lo contrario está mal · dispara al tocar este módulo para #9/#10:
+  hacer `pub` una sola copia en `client.zig` y que `probe.zig` la use.
