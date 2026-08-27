@@ -54,9 +54,3 @@ Formato: `- [YYYY-MM-DD] #issue — qué se vio · por qué no se arregló ahora
   celda queda "stale" por diseño (`render.zig:373-378`) y `update()` sostendría el lock durante la
   denormalización de estilos · no aplica a este spike (sin hilos) · dispara al diseñar el widget de
   render en M2: usar las dos fases explícitas, nunca `update()`.
-- [2026-08-27] #5 — segundo intento de Apply con `core-builder` (OpenCode/MiMo) para arreglar el bug
-  de memoria en `client.zig` no produjo cambios: el proceso solo re-exploró `std.Io.net.Stream.Reader`
-  por `sed`/`grep` y terminó con exit 0 sin tocar ningún archivo ni emitir reporte · se escaló a
-  `core-builder-fallback` (Claude) para ese parche puntual en vez de descartar todo el diff (el resto
-  — schema vendorizado, tabla de citas, flag en main.zig — ya estaba verificado) · dispara si vuelve a
-  pasar: un `exit 0` de OpenCode sin diff ni reporte debe tratarse como fallo, no como éxito silencioso.

@@ -246,6 +246,12 @@ fn demoAgentList(io: Io, socket_path: []const u8, gpa: std.mem.Allocator, stdout
         return;
     }
 
+    // Declared once outside the loop and reused per-iteration: `pane_str` for
+    // the `.integer` case is a slice into this buffer, and it must still be
+    // valid at the `print` below — an `int_buf` declared inside the `blk:`
+    // scope would close before that use, the same class of dangling-slice UB
+    // this issue was opened to fix (see `docs/adr` note in the fix report).
+    var int_buf: [32]u8 = undefined;
     for (agents.array.items) |agent| {
         const pane_id = agent.object.get("pane_id") orelse .null;
         const agent_name = agent.object.get("agent") orelse .null;
@@ -253,10 +259,7 @@ fn demoAgentList(io: Io, socket_path: []const u8, gpa: std.mem.Allocator, stdout
 
         const pane_str = switch (pane_id) {
             .string => |s| s,
-            .integer => |i| blk: {
-                var int_buf: [32]u8 = undefined;
-                break :blk std.fmt.bufPrint(&int_buf, "{d}", .{i}) catch "?";
-            },
+            .integer => |i| std.fmt.bufPrint(&int_buf, "{d}", .{i}) catch "?",
             else => "?",
         };
         const agent_str = switch (agent_name) {
