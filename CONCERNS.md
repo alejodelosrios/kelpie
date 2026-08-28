@@ -102,3 +102,21 @@ Formato: `- [YYYY-MM-DD] #issue — qué se vio · por qué no se arregló ahora
   ola repite el patrón: dejar de tratarlo como reincidencia aislada y abrir issue dedicado a
   investigar la causa raíz de MiMo en esta máquina (coincide con el hijo de #13 fallando en
   paralelo con el mismo síntoma).
+- [2026-08-28] #8 — el guard de regresión de memoria del camino nuevo (`openForRequestGuardTest`,
+  `src/herdr/client.zig`) prueba una réplica del setup de `request()`, no el `request()` real — si
+  `request()` cambia su patrón de apertura de `Connection`, el guard sigue verde sin detectarlo ·
+  no se resolvió porque exponer el `conn` interno de `request()` para un test externo requeriría
+  cambiar la firma pública o una función de test-only más invasiva, y el patrón hoy es idéntico ·
+  dispara si `request()` cambia cómo abre `Connection`: mover el guard a inspeccionar el `request()`
+  real, no una copia.
+- [2026-08-28] #8 — `last_received_line_buf` (test-only, `src/herdr/client.zig`) tiene una carrera de
+  datos formal: se escribe desde el hilo del `FakeServer` y se lee desde el test antes de su
+  `defer thread.join()` diferido — en la práctica el orden lo impone el ida y vuelta del socket, pero
+  no hay happens-before declarado · no se resolvió porque no afecta código de producción, solo un
+  test · dispara si `zig build test` empieza a fallar de forma intermitente en ese test específico:
+  mover la lectura después del `join()` explícito, no confiar en el orden implícito.
+- [2026-08-28] #8 — `request()` mete un `Connection` de 128 KiB (`read_buf`+`write_buf`, 64 KiB cada
+  uno) en su propio frame de pila · aceptado porque el hilo de GTK tiene pila de sobra, pero no se
+  verificó para ningún otro contexto de llamada · dispara si `request()` se llama algún día desde un
+  hilo con pila reducida (p.ej. un hilo worker con stack_size explícito bajo): mover `Connection` a
+  heap o reducir sus buffers para esa ruta.
