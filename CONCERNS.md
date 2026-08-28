@@ -93,3 +93,12 @@ Formato: `- [YYYY-MM-DD] #issue — qué se vio · por qué no se arregló ahora
   (documentada con `hyprctl`/`wtype`/`grim`, no automatizable en CI headless — declarado en el propio
   diseño) · el quinto barato que sí sería automatizable (comparar el `app_id` contra la constante) no
   se escribió · dispara con el próximo issue de `src/ui/`: añadir ese test puntual.
+- [2026-08-28] #8 — `core-builder` (OpenCode+MiMo) falló el Apply real dos veces seguidas con el
+  diseño aprobado (`roadmap/designs/8-cliente-rpc.md`): 0 bytes de log, 0 diff en ambos intentos ·
+  reincidencia exacta de las filas `#4`/`#5 · Motor / capacidad` de `lessons-learned.md` — no aporta
+  regla nueva, por eso no entra ahí, solo aquí como constancia · se escaló a
+  `core-builder-fallback` (Claude) sin más reintentos con MiMo, por la regla ya escrita: "0 bytes,
+  0 diff" es la señal de ir a fallback, no de esperar más · dispara si un tercer issue en la misma
+  ola repite el patrón: dejar de tratarlo como reincidencia aislada y abrir issue dedicado a
+  investigar la causa raíz de MiMo en esta máquina (coincide con el hijo de #13 fallando en
+  paralelo con el mismo síntoma).

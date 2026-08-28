@@ -44,10 +44,10 @@ pub const Connection = struct {
     /// Returns the raw response line (caller owns nothing — buffer is internal).
     pub fn sendRequest(
         self: *Connection,
-        request: anytype,
+        req: anytype,
     ) ![]u8 {
         // Serialize request to the writer buffer, then flush.
-        try json.Stringify.value(request, .{}, &self.writer.interface);
+        try json.Stringify.value(req, .{}, &self.writer.interface);
         try self.writer.interface.writeByte('\n');
         try self.writer.interface.flush();
 
@@ -67,12 +67,136 @@ pub fn resolveSocketPath(
 ) ![]const u8 {
     if (environ.get("HERDR_SOCKET_PATH")) |p| return p;
 
+    if (environ.get("XDG_CONFIG_HOME")) |xdg| {
+        const suffix = "/herdr/herdr.sock";
+        if (xdg.len + suffix.len > buf.len) return error.PathTooLong;
+        @memcpy(buf[0..xdg.len], xdg);
+        @memcpy(buf[xdg.len..][0..suffix.len], suffix);
+        return buf[0 .. xdg.len + suffix.len];
+    }
+
     const home = environ.get("HOME") orelse return error.HomeNotSet;
     const suffix = "/.config/herdr/herdr.sock";
     if (home.len + suffix.len > buf.len) return error.PathTooLong;
     @memcpy(buf[0..home.len], home);
     @memcpy(buf[home.len..][0..suffix.len], suffix);
     return buf[0 .. home.len + suffix.len];
+}
+
+/// Default read timeout for `request()`: generous enough for a busy herdr
+/// instance, short enough that a genuinely dead server doesn't hang forever.
+pub const default_read_timeout_ms: u32 = 15_000;
+
+/// Error codes herdr's protocol-level `{"error":{code,message}}` responses
+/// carry. `.unknown` covers any code string herdr adds later that this
+/// client doesn't recognize yet — the raw string is still available via
+/// `RpcError.message`, so nothing is lost.
+pub const RpcErrorCode = enum {
+    invalid_request,
+    invalid_params,
+    agent_blocked,
+    agent_not_ready,
+    pane_not_found,
+    invalid_target,
+    ui_busy,
+    protocol_mismatch,
+    unknown,
+};
+
+/// Detail behind `error.HerdrRpc`: herdr answered with a protocol-level
+/// error object instead of a result. `message` is gpa-owned — free it with
+/// `.deinit(gpa)` once you're done reading it.
+pub const RpcError = struct {
+    code: RpcErrorCode,
+    message: []u8,
+
+    pub fn deinit(self: RpcError, gpa: std.mem.Allocator) void {
+        gpa.free(self.message);
+    }
+};
+
+pub const Response = json.Parsed(json.Value);
+
+var next_id: std.atomic.Value(u64) = .init(1);
+
+/// Times out a blocked read by shutting down the read side of the socket
+/// out from under it — `SO_RCVTIMEO` doesn't work here: on Linux a timed-out
+/// blocking read returns `EAGAIN`, not `ETIMEDOUT`, and this Io backend's
+/// `netReadPosix` treats `EAGAIN` on a blocking socket as a programmer bug
+/// and panics (`Threaded.zig:12619`, `errnoBug` at `:14054-14056`).
+/// `shutdown(.recv)` is standard POSIX: it makes a concurrently-blocked read
+/// on the same socket return `0` (EOF) immediately, which `readVec` already
+/// turns into `error.EndOfStream` — no `AGAIN` branch involved.
+const Watchdog = struct {
+    stream: net.Stream,
+    io: Io,
+    timeout_ms: u32,
+    request_done: std.atomic.Value(bool) = .init(false),
+    fired: std.atomic.Value(bool) = .init(false),
+
+    fn run(self: *@This()) void {
+        Io.sleep(self.io, .fromMilliseconds(self.timeout_ms), .awake) catch return;
+        if (!self.request_done.load(.acquire)) {
+            self.fired.store(true, .release);
+            self.stream.shutdown(self.io, .recv) catch {};
+        }
+    }
+};
+
+/// One-shot request over `Connection`: opens a fresh connection, sends
+/// `method`/`params`, reads one NDJSON response line, and closes — herdr
+/// closes after answering any non-subscription method, so a connection per
+/// request is the only shape that works here.
+///
+/// `rpc_err.*` is reset to `null` up front. On a protocol-level error
+/// response (`{"error":{code,message}}`) this returns `error.HerdrRpc` and
+/// leaves the detail in `rpc_err.*` — the caller must `.deinit(gpa)` it only
+/// when it's non-null. On success the caller owns the returned `Response`
+/// and must `.deinit()` it.
+pub fn request(
+    gpa: std.mem.Allocator,
+    io: Io,
+    socket_path: []const u8,
+    method: []const u8,
+    params: anytype,
+    read_timeout_ms: u32,
+    rpc_err: *?RpcError,
+) !Response {
+    rpc_err.* = null;
+
+    var conn: Connection = undefined; // must reach its final address before `.open()` — see Connection's doc-comment.
+    try conn.open(io, socket_path);
+    defer conn.close();
+
+    var id_buf: [20]u8 = undefined;
+    const id = try std.fmt.bufPrint(&id_buf, "{d}", .{next_id.fetchAdd(1, .monotonic)});
+
+    var wd: Watchdog = .{ .stream = conn.stream, .io = io, .timeout_ms = read_timeout_ms };
+    const wd_thread = try std.Thread.spawn(.{}, Watchdog.run, .{&wd});
+
+    const send_result = conn.sendRequest(.{ .id = id, .method = method, .params = params });
+    wd.request_done.store(true, .release);
+    wd_thread.join();
+
+    const line = send_result catch |err| {
+        if (wd.fired.load(.acquire)) return error.Timeout;
+        return err;
+    };
+
+    const parsed = try json.parseFromSlice(json.Value, gpa, line, .{ .ignore_unknown_fields = true });
+
+    if (parsed.value.object.get("error")) |err_obj| {
+        const code_str = (err_obj.object.get("code") orelse return error.UnexpectedResponse).string;
+        const msg = (err_obj.object.get("message") orelse return error.UnexpectedResponse).string;
+        rpc_err.* = .{
+            .code = std.meta.stringToEnum(RpcErrorCode, code_str) orelse .unknown,
+            .message = try gpa.dupe(u8, msg),
+        };
+        parsed.deinit();
+        return error.HerdrRpc;
+    }
+
+    return parsed;
 }
 
 // ---------------------------------------------------------------------------
@@ -328,4 +452,254 @@ test "events.subscribe opens a persistent stream and acks subscription_started" 
     // depends on a human interacting with an agent during the capture
     // window — not automatable from here. See the manual script in the QA
     // report for that half of the scenario.
+}
+
+// ---------------------------------------------------------------------------
+// Tests for `request()` and the `XDG_CONFIG_HOME` step of `resolveSocketPath`
+// — Gherkin scenarios from roadmap/designs/8-cliente-rpc.md.
+//
+// These use a `FakeServer` (a real Unix socket listener on a thread) instead
+// of the live herdr socket, so they run everywhere `zig build test` runs,
+// not just inside a herdr session.
+// ---------------------------------------------------------------------------
+
+var fake_server_next_id: std.atomic.Value(u32) = .init(0);
+
+const FakeServerScript = enum {
+    /// Responds `{"result":{"type":"pong"}}` in a single write.
+    ping_ok,
+    /// Same response, split across two writes with a short sleep between —
+    /// covers the "assembles across fragments" scenario.
+    ping_split,
+    /// Responds a protocol-level error object.
+    protocol_error,
+    /// Drains the request, then closes without writing anything.
+    close_no_response,
+    /// Drains the request, then sleeps well past the client's injected
+    /// timeout without ever responding.
+    hang,
+};
+
+/// Set by `fakeServerThread` to whatever request line it drained — lets
+/// tests assert on what the client actually sent over the wire. Safe as a
+/// package-level `var`: `zig build test` runs tests sequentially, and each
+/// test's `FakeServer` thread is joined before the next test starts.
+var last_received_line_buf: [256]u8 = undefined;
+var last_received_line_len: usize = 0;
+
+fn fakeServerThread(server: *net.Server, io: Io, script: FakeServerScript) void {
+    const stream = server.accept(io) catch return;
+    defer stream.close(io);
+
+    // Drain the request line first so the client's write never races the
+    // server closing the socket out from under it.
+    var read_buf: [4096]u8 = undefined;
+    var reader = stream.reader(io, &read_buf);
+    if (reader.interface.takeDelimiterExclusive('\n') catch null) |line| {
+        last_received_line_len = @min(line.len, last_received_line_buf.len);
+        @memcpy(last_received_line_buf[0..last_received_line_len], line[0..last_received_line_len]);
+    }
+
+    var write_buf: [512]u8 = undefined;
+    var writer = stream.writer(io, &write_buf);
+    switch (script) {
+        .ping_ok => {
+            writer.interface.writeAll("{\"result\":{\"type\":\"pong\"}}\n") catch return;
+            writer.interface.flush() catch return;
+        },
+        .ping_split => {
+            writer.interface.writeAll("{\"result\":{\"type\"") catch return;
+            writer.interface.flush() catch return;
+            io.sleep(.fromMilliseconds(20), .awake) catch return;
+            writer.interface.writeAll(":\"pong\"}}\n") catch return;
+            writer.interface.flush() catch return;
+        },
+        .protocol_error => {
+            writer.interface.writeAll(
+                "{\"error\":{\"code\":\"invalid_params\",\"message\":\"falta X\"}}\n",
+            ) catch return;
+            writer.interface.flush() catch return;
+        },
+        .close_no_response => {},
+        .hang => {
+            io.sleep(.fromMilliseconds(300), .awake) catch {};
+        },
+    }
+}
+
+/// Starts a `FakeServer` on a unique `/tmp` socket path and spawns the
+/// accept/respond thread. The listener (`server`) is an out-parameter —
+/// same address contract as `Connection.open`: it must already live at its
+/// final address before this runs, since the spawned thread captures a
+/// pointer to it. Callers must `defer thread.join()` before `defer
+/// server.deinit(io)` (LIFO: join first, then deinit) so the thread never
+/// touches `server` after it's torn down.
+fn startFakeServer(
+    server: *net.Server,
+    io: Io,
+    script: FakeServerScript,
+    path_buf: *[64]u8,
+) !struct { path: []const u8, thread: std.Thread } {
+    const path = try std.fmt.bufPrint(
+        path_buf,
+        "/tmp/kelpie-herdr-fake-{d}.sock",
+        .{fake_server_next_id.fetchAdd(1, .monotonic)},
+    );
+    const addr = try net.UnixAddress.init(path);
+    server.* = try addr.listen(io, .{});
+    const thread = try std.Thread.spawn(.{}, fakeServerThread, .{ server, io, script });
+    return .{ .path = path, .thread = thread };
+}
+
+/// Test-only: mirrors `request()`'s connection setup (`var conn: Connection
+/// = undefined` local, `.open()`, never copied afterwards) so the memory
+/// guard `openLive`'s test already checks for that call-site also covers
+/// `request()`'s own `conn` — without exposing it from the public function.
+fn openForRequestGuardTest(io: Io, socket_path: []const u8) !void {
+    var conn: Connection = undefined;
+    try conn.open(io, socket_path);
+    defer conn.close();
+    try testing.expectEqual(@intFromPtr(&conn.read_buf), @intFromPtr(conn.reader.interface.buffer.ptr));
+}
+
+test "request: conn's reader buffer never moves off conn's address" {
+    var path_buf: [64]u8 = undefined;
+    var server: net.Server = undefined;
+    const started = try startFakeServer(&server, testing.io, .close_no_response, &path_buf);
+    defer std.Io.Dir.deleteFileAbsolute(testing.io, started.path) catch {};
+    defer server.deinit(testing.io);
+    defer started.thread.join();
+
+    try openForRequestGuardTest(testing.io, started.path);
+}
+
+test "request: ping against a FakeServer that answers in one write" {
+    var path_buf: [64]u8 = undefined;
+    var server: net.Server = undefined;
+    const started = try startFakeServer(&server, testing.io, .ping_ok, &path_buf);
+    defer std.Io.Dir.deleteFileAbsolute(testing.io, started.path) catch {};
+    defer server.deinit(testing.io);
+    defer started.thread.join();
+
+    var rpc_err: ?RpcError = null;
+    const resp = try request(testing.allocator, testing.io, started.path, "ping", .{}, default_read_timeout_ms, &rpc_err);
+    defer resp.deinit();
+
+    try testing.expect(rpc_err == null);
+    const result = resp.value.object.get("result") orelse return error.UnexpectedResponse;
+    const rtype = result.object.get("type") orelse return error.UnexpectedResponse;
+    try testing.expectEqualStrings("pong", rtype.string);
+}
+
+test "request: response split across two writes still assembles" {
+    var path_buf: [64]u8 = undefined;
+    var server: net.Server = undefined;
+    const started = try startFakeServer(&server, testing.io, .ping_split, &path_buf);
+    defer std.Io.Dir.deleteFileAbsolute(testing.io, started.path) catch {};
+    defer server.deinit(testing.io);
+    defer started.thread.join();
+
+    var rpc_err: ?RpcError = null;
+    const resp = try request(testing.allocator, testing.io, started.path, "ping", .{}, default_read_timeout_ms, &rpc_err);
+    defer resp.deinit();
+
+    const result = resp.value.object.get("result") orelse return error.UnexpectedResponse;
+    const rtype = result.object.get("type") orelse return error.UnexpectedResponse;
+    try testing.expectEqualStrings("pong", rtype.string);
+}
+
+test "request: protocol error maps to error.HerdrRpc with a typed code" {
+    var path_buf: [64]u8 = undefined;
+    var server: net.Server = undefined;
+    const started = try startFakeServer(&server, testing.io, .protocol_error, &path_buf);
+    defer std.Io.Dir.deleteFileAbsolute(testing.io, started.path) catch {};
+    defer server.deinit(testing.io);
+    defer started.thread.join();
+
+    var rpc_err: ?RpcError = null;
+    const result = request(testing.allocator, testing.io, started.path, "ping", .{}, default_read_timeout_ms, &rpc_err);
+    try testing.expectError(error.HerdrRpc, result);
+
+    const err = rpc_err orelse return error.UnexpectedResponse;
+    defer err.deinit(testing.allocator);
+    try testing.expectEqual(RpcErrorCode.invalid_params, err.code);
+    try testing.expect(std.mem.indexOf(u8, err.message, "falta X") != null);
+}
+
+test "request: server closes without responding surfaces error.EndOfStream" {
+    var path_buf: [64]u8 = undefined;
+    var server: net.Server = undefined;
+    const started = try startFakeServer(&server, testing.io, .close_no_response, &path_buf);
+    defer std.Io.Dir.deleteFileAbsolute(testing.io, started.path) catch {};
+    defer server.deinit(testing.io);
+    defer started.thread.join();
+
+    var rpc_err: ?RpcError = null;
+    const result = request(testing.allocator, testing.io, started.path, "ping", .{}, default_read_timeout_ms, &rpc_err);
+    try testing.expectError(error.EndOfStream, result);
+}
+
+test "request: no response within the injected timeout surfaces error.Timeout" {
+    var path_buf: [64]u8 = undefined;
+    var server: net.Server = undefined;
+    const started = try startFakeServer(&server, testing.io, .hang, &path_buf);
+    defer std.Io.Dir.deleteFileAbsolute(testing.io, started.path) catch {};
+    defer server.deinit(testing.io);
+    defer started.thread.join();
+
+    var rpc_err: ?RpcError = null;
+    const result = request(testing.allocator, testing.io, started.path, "ping", .{}, 50, &rpc_err);
+    try testing.expectError(error.Timeout, result);
+}
+
+test "request: emits the id field as a JSON string, never a bare number" {
+    var path_buf: [64]u8 = undefined;
+    var server: net.Server = undefined;
+    const started = try startFakeServer(&server, testing.io, .ping_ok, &path_buf);
+    defer std.Io.Dir.deleteFileAbsolute(testing.io, started.path) catch {};
+    defer server.deinit(testing.io);
+    defer started.thread.join();
+
+    var rpc_err: ?RpcError = null;
+    const resp = try request(testing.allocator, testing.io, started.path, "ping", .{}, default_read_timeout_ms, &rpc_err);
+    defer resp.deinit();
+
+    // `fakeServerThread` copies the raw request line it drained into
+    // `last_received_line_buf` before responding — inspect what `request()`
+    // actually put on the wire.
+    const sent = last_received_line_buf[0..last_received_line_len];
+    try testing.expect(std.mem.indexOf(u8, sent, "\"id\":\"") != null);
+}
+
+test "resolveSocketPath: HERDR_SOCKET_PATH wins over everything" {
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    var env: std.process.Environ.Map = .init(testing.allocator);
+    defer env.deinit();
+    try env.put("HERDR_SOCKET_PATH", "/custom/herdr.sock");
+    try env.put("XDG_CONFIG_HOME", "/xdg");
+    try env.put("HOME", "/home/x");
+
+    const path = try resolveSocketPath(env, &buf);
+    try testing.expectEqualStrings("/custom/herdr.sock", path);
+}
+
+test "resolveSocketPath: XDG_CONFIG_HOME is the second step" {
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    var env: std.process.Environ.Map = .init(testing.allocator);
+    defer env.deinit();
+    try env.put("XDG_CONFIG_HOME", "/xdg");
+    try env.put("HOME", "/home/x");
+
+    const path = try resolveSocketPath(env, &buf);
+    try testing.expectEqualStrings("/xdg/herdr/herdr.sock", path);
+}
+
+test "resolveSocketPath: HOME is the fallback" {
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    var env: std.process.Environ.Map = .init(testing.allocator);
+    defer env.deinit();
+    try env.put("HOME", "/home/x");
+
+    const path = try resolveSocketPath(env, &buf);
+    try testing.expectEqualStrings("/home/x/.config/herdr/herdr.sock", path);
 }
