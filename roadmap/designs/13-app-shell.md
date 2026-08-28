@@ -16,9 +16,12 @@ imprime la versión y sale 0 sin abrir ventana.
   `activate`, arma el árbol de widgets, registra el shortcut de sidebar. Territorio `ui-builder`.
 - `src/main.zig` — añade el flag `--version` (imprime y retorna antes del resto) y cambia la rama
   `else` (sin flags) para llamar `app_shell.run()` en vez de imprimir nombre+versión. **Hotspot de
-  `core-builder`**, pero por precedente de #3 (mismo patrón: un builder de `ui-builder` hizo el
-  spike completo incluyendo el wiring de 4 líneas en `main.zig`, sin tocar `build.zig`/`build.zig.zon`
-  — ver commit `0c4e710`), lo hace `ui-builder` en un solo pase. No hay cambio a `build.zig` ni
+  `core-builder`** en general, pero en esta ola el único otro issue abierto que toca `src/herdr/`
+  (#8) se limita explícitamente a `src/herdr/client.zig` + `README.md` — no toca `src/main.zig`
+  (confirmado en `gh issue view 8`, sección "Alcance": "Entra, todo dentro de
+  `src/herdr/client.zig`"). Con el lease del hotspot libre en esta ventana, y el resto del issue
+  siendo puramente `area:ui`, lo hace `ui-builder` en un solo pase en vez de secuenciar
+  core→verificar→commitear→ui para un wiring de 4 líneas. No hay cambio a `build.zig` ni
   `build.zig.zon`: `gobject`/`adw`/`gtk`/`gio`/`gdk` ya están importados en `exe_mod` desde #3.
 
 **No entra** (copiado del issue, más lo recortado por YAGNI):
