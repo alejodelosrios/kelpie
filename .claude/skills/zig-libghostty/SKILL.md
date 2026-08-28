@@ -84,7 +84,7 @@ pinneado).
    const only_dirty = switch (state.dirty) {
        .false => return,   // nada cambió: no se pinta frame
        .partial => true,   // saltar las filas limpias
-       else => false,      // .full: repintar todo (`lib.Enum` es exhaustivo, `lib/enum.zig:42`)
+       else => false,      // .full: repintar todo (`lib.Enum` es exhaustivo, `lib/enum.zig:43`)
    };
    const rows = state.row_data.slice();
    const dirty = rows.items(.dirty);           // []bool, una entrada por fila
@@ -133,7 +133,7 @@ pinneado).
   `f_num_glyphs`, `f_glyphs`). Los métodos no llevan prefijo. Sin esto, cada acceso a un campo se
   escribe mal.
 - Alineación en rejilla: tras `pango.shape`, sobreescribir el avance de cada glifo a una celda
-  (`PANGO_SCALE` = 1024). Lo que compila y lo que midió el spike (`src/ui/grid_widget.zig:212-216`):
+  (`PANGO_SCALE` = 1024). Lo que compila y lo que midió el spike (`src/ui/grid_widget.zig:212-217`):
 
   ```zig
   const forced_width: pango.GlyphUnit = @intFromFloat(cell_w * 1024.0);

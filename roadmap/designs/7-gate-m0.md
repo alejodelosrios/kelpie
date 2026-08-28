@@ -51,12 +51,12 @@ verificó el PM con `sed -n`/`grep -n` antes de escribirla. Rutas absolutas; `G`
 | El patrón lo usa el test oficial `"dirty state"` | `$G/terminal/render.zig:1960` | ✅ |
 | El dispatcher `omarchy` escanea **todo** el remanente buscando `-h`/`--help` (y para en `--`) | `/usr/share/omarchy/bin/omarchy:128-137` | ✅ |
 | `omarchy-notification-dismiss` llama `omarchy-shell -q` → nunca imprime nada | `/usr/share/omarchy/bin/omarchy-notification-dismiss:11` | ✅ |
-| Urgencia `normal` expira a 8000 ms; solo `Critical` devuelve `0` | `/usr/share/omarchy/shell/plugins/notifications/Service.qml:98-104` | ✅ |
+| Urgencia `normal` expira a 8000 ms; solo `Critical` devuelve `0` | `/usr/share/omarchy/shell/plugins/notifications/Service.qml:98-105` | ✅ |
 | `omarchy-shell notifications invokeLast` llama al mismo `invokePopupDefault` que el click | `…/Service.qml:904-906`, `:360`, `:1056` | ✅ |
 | `RenderState.Cell` envuelve la celda cruda en `raw` → la llamada es `cell.raw.hasStyling()` | `$G/terminal/render.zig:264-269` | ✅ |
-| `lib.Enum` construye un enum **exhaustivo** (no hay valor imprevisto que manejar) | `$G/lib/enum.zig:42` | ✅ |
+| `lib.Enum` construye un enum **exhaustivo** (no hay valor imprevisto que manejar) | `$G/lib/enum.zig:43` | ✅ |
 | En Zig 0.16 `linkSystemLibrary` vive en `std.Build.Module` y lleva struct de opciones | `/usr/lib/zig/std/Build/Module.zig:363`, uso real en `build.zig:53` | ✅ |
-| Los campos de struct de zig-gobject llevan prefijo `f_`: `g.f_geometry.f_width`, `gs.f_num_glyphs` | `src/ui/grid_widget.zig:212-216` | ✅ |
+| Los campos de struct de zig-gobject llevan prefijo `f_`: `g.f_geometry.f_width`, `gs.f_num_glyphs` | `src/ui/grid_widget.zig:212-217` | ✅ |
 
 > Añadidas tras la primera pasada del auditor: `linkSystemLibrary` y el acceso al avance del glifo se
 > habían escrito **de memoria**, por fuera de esta tabla, y las dos estaban mal. Es la regla que manda
