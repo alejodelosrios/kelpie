@@ -2,6 +2,7 @@ const std = @import("std");
 const ghostty_vt = @import("ghostty-vt");
 const herdr_probe = @import("herdr/probe.zig");
 const spike_b = @import("ui/spike_b.zig");
+const app_shell = @import("ui/app_shell.zig");
 
 pub const name = "kelpie";
 // ponytail: duplicated from build.zig.zon on purpose; wire a build option when the version is set by CI.
@@ -15,13 +16,19 @@ pub fn main(init: std.process.Init) !void {
     var vt_info = false;
     var herdr_probe_flag = false;
     var run_spike_b = false;
+    var version_flag = false;
     for (args[1..]) |arg| {
         if (std.mem.eql(u8, arg, "--vt-info")) vt_info = true;
         if (std.mem.eql(u8, arg, "--herdr-probe")) herdr_probe_flag = true;
         if (std.mem.eql(u8, arg, "--spike-b")) run_spike_b = true;
+        if (std.mem.eql(u8, arg, "--version")) version_flag = true;
     }
 
-    if (herdr_probe_flag) {
+    if (version_flag) {
+        try stdout.interface.print("{s} {s}\n", .{ name, version });
+        try stdout.interface.flush();
+        return;
+    } else if (herdr_probe_flag) {
         if (init.environ_map.get("HERDR_ENV") == null) {
             try stdout.interface.print("error: --herdr-probe requires HERDR_ENV=1 (must run inside a herdr session)\n", .{});
             try stdout.interface.flush();
@@ -38,7 +45,7 @@ pub fn main(init: std.process.Init) !void {
         defer t.deinit(init.gpa);
         try stdout.interface.print("{d}x{d}\n", .{ t.cols, t.rows });
     } else {
-        try stdout.interface.print("{s} {s}\n", .{ name, version });
+        std.process.exit(app_shell.run(init));
     }
     try stdout.interface.flush();
 }
@@ -74,4 +81,5 @@ test "version is valid semver" {
 // under `zig build test`.
 test {
     _ = herdr_probe;
+    _ = app_shell;
 }
