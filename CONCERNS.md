@@ -69,3 +69,27 @@ Formato: `- [YYYY-MM-DD] #issue — qué se vio · por qué no se arregló ahora
   (`probe.zig` ya importa `client.zig`, sin ciclo posible: `client.zig` no importa nada del repo salvo
   `std`) — cualquier nota que diga lo contrario está mal · dispara al tocar este módulo para #9/#10:
   hacer `pub` una sola copia en `client.zig` y que `probe.zig` la use.
+- [2026-08-28] #13 — `src/ui/app_shell.zig:41` lee `LANG` antes que `LC_ALL`; POSIX define `LC_ALL`
+  como el que anula a `LANG`, no al revés, así que `LANG=en_US.UTF-8 LC_ALL=es_MX.UTF-8` (forzar
+  español sobre un sistema en inglés) muestra "No agents" · no se corrigió en el ciclo porque el
+  auditor lo marcó no bloqueante y el Gherkin del diseño solo pide "según LANG" (i18n real es YAGNI
+  declarado) · dispara si i18n deja de ser YAGNI: invertir el orden de los dos `get` y añadir un test.
+- [2026-08-28] #13 — `src/ui/app_shell.zig:108` (`toggleSidebar`) hace `user_data.?` sin fallback;
+  el único registro pasa `split` así que hoy es provably no-nulo, pero es el único punto del diff
+  donde un puntero nulo aborta el proceso en vez de degradar · no se corrigió porque el auditor lo
+  marcó no bloqueante (una línea, sin urgencia) · dispara si se reutiliza este patrón de callback con
+  un `user_data` que sí pueda ser nulo: cambiar a `orelse return 0`.
+- [2026-08-28] #13 — `adw.ToolbarView.addBottomBar` se usó en el Apply sin estar en la tabla de citas
+  del diseño (`roadmap/designs/13-app-shell.md`, que solo listaba `addTopBar`/`setContent`) · la API
+  es real y la firma correcta (verificada por el auditor), así que no bloqueó, pero es reincidencia
+  parcial de la lección de #7 (afirmación técnica fuera de la tabla de citas) · dispara si vuelve a
+  pasar: el gate mecánico de FASE 5 debería diffear las llamadas nuevas del Apply contra la tabla del
+  diseño, no solo verificar las filas que ya están.
+- [2026-08-28] #13 — `std.process.exit(app_shell.run(init))` en `src/main.zig` salta el
+  `try stdout.interface.flush()` final de `main` · inocuo hoy (esa rama no escribe nada a stdout antes
+  de abrir la ventana) · dispara si alguien añade un `print` de diagnóstico antes de `app_shell.run`:
+  hacer flush explícito antes del `exit`.
+- [2026-08-28] #13 — de los 5 escenarios Gherkin, 4 solo tienen verificación manual en sesión Wayland
+  (documentada con `hyprctl`/`wtype`/`grim`, no automatizable en CI headless — declarado en el propio
+  diseño) · el quinto barato que sí sería automatizable (comparar el `app_id` contra la constante) no
+  se escribió · dispara con el próximo issue de `src/ui/`: añadir ese test puntual.
