@@ -63,13 +63,43 @@ if (b.lazyDependency("ghostty", .{})) |dep| {
 - El módulo Zig no incluye Oniguruma: sin búsqueda por regex en el buffer.
 - La API es **inestable por declaración** (`src/lib_vt.zig:1-9`): cada bump del commit es un PR propio con `zig build test` verde.
 
-### Contrato de filas sucias (render.h:23-72)
+### Contrato de filas sucias (verificado en #4)
 
-1. El hilo de render **bloquea** el terminal, llama `begin_update`, **desbloquea**, y termina con `end_update` sobre memoria propia del render state.
-2. Hay **dos capas** de dirty: global (`false | partial | full`) y por fila. `update` solo las pone; nunca las limpia.
-3. Se itera con el iterador de filas sucias (`next_dirty`): con global `partial` salta filas limpias, con `full` devuelve todas.
-4. Tras pintar el frame completo, `clean()` limpia las dos capas de una vez. Limpiar una no limpia la otra.
-5. Los nombres Zig equivalentes se leen en `src/terminal/render.zig` del commit pinneado; los nombres C de arriba son la referencia documentada.
+`render.h:23-72` documenta el contrato, pero **sus nombres son del shim C, no de la fachada Zig**.
+Lo de abajo es lo que un consumidor Zig escribe de verdad (`src/terminal/render.zig` del commit
+pinneado).
+
+1. El hilo de render **bloquea** el terminal, llama `beginUpdate` (`render.zig:373`), **desbloquea**,
+   y termina con `endUpdate` (`render.zig:754`) sobre memoria propia del render state.
+   **Usa las dos por separado, nunca `update()`**: entre fases el estilo por celda queda "stale" por
+   diseño, y `update()` sostendría el lock del terminal durante la denormalización de estilos.
+2. Hay **dos capas** de dirty: global (`RenderState.Dirty` = `.false` / `.partial` / `.full`,
+   `render.zig:281-292`) y por fila. `beginUpdate` solo las pone; nunca las limpia.
+3. **No hay iterador de filas sucias en la fachada Zig.** `row_iterator_next_dirty` vive solo en el
+   shim C (`src/terminal/c/render.zig:575`) y no se re-exporta. El patrón Zig es el `MultiArrayList`
+   de filas (`render.zig:97`) — el mismo que usa el test oficial `"dirty state"` (`render.zig:1960`):
+
+   ```zig
+   // Nada de `unreachable` aquí: esto es camino de render (regla del repo).
+   const only_dirty = switch (state.dirty) {
+       .false => return,   // nada cambió: no se pinta frame
+       .partial => true,   // saltar las filas limpias
+       else => false,      // .full: repintar todo (`lib.Enum` es exhaustivo, `lib/enum.zig:42`)
+   };
+   const rows = state.row_data.slice();
+   const dirty = rows.items(.dirty);           // []bool, una entrada por fila
+   for (dirty, 0..) |is_dirty, y| {
+       if (only_dirty and !is_dirty) continue;
+       // pintar la fila y
+   }
+   ```
+4. Tras pintar el frame completo, `clean()` (`render.zig:818-820`) limpia las dos capas de una vez.
+   Limpiar una no limpia la otra: quien consuma medio frame las limpia por separado.
+5. **Guarda obligatoria antes de leer el estilo de una celda**: `cell.style` es memoria **indefinida**
+   si la celda no tiene estilo (`render.zig:275-277`). Comprobar `hasStyling()` antes de tocarlo —
+   y ojo al camino: `RenderState.Cell` **envuelve** la celda cruda en el campo `raw`
+   (`render.zig:264-269`), así que la llamada es `cell.raw.hasStyling()`
+   (`page.zig:2291-2293`, `style_id != stylepkg.default_id`).
 
 **Ceiling de rendimiento:** un frame solo toca filas sucias; redibujar la pantalla entera es un bug de rendimiento, no una simplificación aceptable.
 
@@ -93,7 +123,41 @@ if (b.lazyDependency("ghostty", .{})) |dep| {
 - Subclases de widget: el patrón vive en `src/apprt/gtk/class.zig` y `class/surface.zig`; léelo antes de definir una clase.
 - Claro/oscuro: `adw.StyleManager` + `notify::dark`; libadwaita ya sigue el `color-scheme` de gsettings que Omarchy fija.
 - CSS: `gtk.CssProvider` cargado desde archivo, prioridad `APPLICATION`; en GTK ≥ 4.20 el provider tiene la propiedad `prefers-color-scheme` (`application.zig:1650-1666`).
-- Renderer del terminal: vfunc `snapshot` del widget, texto con Pango (`pango1`) y nodos GSK; nunca dibujar desde otro hilo (`App.zig:23`: GLArea tampoco lo permite).
+- **Renderer del terminal: `gtk.GLArea` + GL propio, NO nodos GSK.** El Spike B (#3) midió la ruta
+  GSK y falla: ~28 fps en el mejor caso (shaping cacheado, `GSK_RENDERER=gl`) redibujando 200×60
+  celdas, contra un umbral de 60. El cuello de botella es componer ~12.000 `gsk.TextNode` por frame,
+  **no el shaping** — cachear el shaping solo duplica el fps, no cierra la brecha. Pango se conserva
+  para shaping y métricas; lo que se descarta es la composición por nodos. Ver ADR-0001
+  §"Resultado del gate (M0)".
+- **zig-gobject prefija todos los campos de struct con `f_`** (`f_geometry`, `f_width`,
+  `f_num_glyphs`, `f_glyphs`). Los métodos no llevan prefijo. Sin esto, cada acceso a un campo se
+  escribe mal.
+- Alineación en rejilla: tras `pango.shape`, sobreescribir el avance de cada glifo a una celda
+  (`PANGO_SCALE` = 1024). Lo que compila y lo que midió el spike (`src/ui/grid_widget.zig:212-216`):
+
+  ```zig
+  const forced_width: pango.GlyphUnit = @intFromFloat(cell_w * 1024.0);
+  if (gs.f_glyphs) |glyphs_ptr| {
+      for (glyphs_ptr[0..@intCast(gs.f_num_glyphs)]) |*g| {
+          g.f_geometry.f_width = forced_width;
+      }
+  }
+  ```
+
+  Consecuencia verificada y aceptada: **las ligaduras no fusionan** (`->` shapea a dos glifos). Es lo
+  que una rejilla exige.
+- `gtk.GLArea` crea contexto y limpia a un color en esta máquina (#3). Las llamadas GL crudas
+  (`glClearColor`/`glClear`) no tienen binding en el tarball `gobject`: se declaran `extern "c"` y se
+  linka la librería del sistema **sobre el módulo, no sobre el `Compile`** — en Zig 0.16
+  `linkSystemLibrary` solo existe en `std.Build.Module` y lleva struct de opciones
+  (`/usr/lib/zig/std/Build/Module.zig:363`). Tal cual está en este repo (`build.zig:53`):
+
+  ```zig
+  exe_mod.linkSystemLibrary("GL", .{});
+  ```
+
+  No es dependencia nueva del zig-pkg: Mesa/GTK ya la exigen en tiempo de ejecución.
+- Nunca dibujar desde otro hilo (`App.zig:23`: GLArea tampoco lo permite).
 
 ## Crashes
 

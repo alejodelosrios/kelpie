@@ -53,6 +53,14 @@ verificó el PM con `sed -n`/`grep -n` antes de escribirla. Rutas absolutas; `G`
 | `omarchy-notification-dismiss` llama `omarchy-shell -q` → nunca imprime nada | `/usr/share/omarchy/bin/omarchy-notification-dismiss:11` | ✅ |
 | Urgencia `normal` expira a 8000 ms; solo `Critical` devuelve `0` | `/usr/share/omarchy/shell/plugins/notifications/Service.qml:98-104` | ✅ |
 | `omarchy-shell notifications invokeLast` llama al mismo `invokePopupDefault` que el click | `…/Service.qml:904-906`, `:360`, `:1056` | ✅ |
+| `RenderState.Cell` envuelve la celda cruda en `raw` → la llamada es `cell.raw.hasStyling()` | `$G/terminal/render.zig:264-269` | ✅ |
+| `lib.Enum` construye un enum **exhaustivo** (no hay valor imprevisto que manejar) | `$G/lib/enum.zig:42` | ✅ |
+| En Zig 0.16 `linkSystemLibrary` vive en `std.Build.Module` y lleva struct de opciones | `/usr/lib/zig/std/Build/Module.zig:363`, uso real en `build.zig:53` | ✅ |
+| Los campos de struct de zig-gobject llevan prefijo `f_`: `g.f_geometry.f_width`, `gs.f_num_glyphs` | `src/ui/grid_widget.zig:212-216` | ✅ |
+
+> Añadidas tras la primera pasada del auditor: `linkSystemLibrary` y el acceso al avance del glifo se
+> habían escrito **de memoria**, por fuera de esta tabla, y las dos estaban mal. Es la regla que manda
+> sobre todas, incumplida en el propio PR que la refuerza. Toda afirmación de skill entra por aquí.
 
 Evidencia de los veredictos (números medidos, no re-derivados aquí):
 #2 → issue #2 comment; #3 → `issues/3#issuecomment-5446538175`; #4 → issue #4 comment;
