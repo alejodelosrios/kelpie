@@ -135,7 +135,15 @@ const Watchdog = struct {
     fired: std.atomic.Value(bool) = .init(false),
 
     fn run(self: *@This()) void {
-        Io.sleep(self.io, .fromMilliseconds(self.timeout_ms), .awake) catch return;
+        // Sleep in short slices instead of one `timeout_ms`-long sleep, so
+        // the happy path (request finishes well under the deadline) doesn't
+        // force `wd_thread.join()` to wait out the full timeout.
+        const slice_ms: u32 = 10;
+        var elapsed_ms: u32 = 0;
+        while (elapsed_ms < self.timeout_ms) : (elapsed_ms += slice_ms) {
+            if (self.request_done.load(.acquire)) return;
+            Io.sleep(self.io, .fromMilliseconds(@min(slice_ms, self.timeout_ms - elapsed_ms)), .awake) catch return;
+        }
         if (!self.request_done.load(.acquire)) {
             self.fired.store(true, .release);
             self.stream.shutdown(self.io, .recv) catch {};
@@ -184,16 +192,22 @@ pub fn request(
     };
 
     const parsed = try json.parseFromSlice(json.Value, gpa, line, .{ .ignore_unknown_fields = true });
+    errdefer parsed.deinit();
+
+    if (parsed.value != .object) return error.UnexpectedResponse;
 
     if (parsed.value.object.get("error")) |err_obj| {
-        const code_str = (err_obj.object.get("code") orelse return error.UnexpectedResponse).string;
-        const msg = (err_obj.object.get("message") orelse return error.UnexpectedResponse).string;
+        if (err_obj != .object) return error.UnexpectedResponse;
+        const code_val = err_obj.object.get("code") orelse return error.UnexpectedResponse;
+        if (code_val != .string) return error.UnexpectedResponse;
+        const msg_val = err_obj.object.get("message") orelse return error.UnexpectedResponse;
+        if (msg_val != .string) return error.UnexpectedResponse;
+
         rpc_err.* = .{
-            .code = std.meta.stringToEnum(RpcErrorCode, code_str) orelse .unknown,
-            .message = try gpa.dupe(u8, msg),
+            .code = std.meta.stringToEnum(RpcErrorCode, code_val.string) orelse .unknown,
+            .message = try gpa.dupe(u8, msg_val.string),
         };
-        parsed.deinit();
-        return error.HerdrRpc;
+        return error.HerdrRpc; // `errdefer` above frees `parsed` on this path.
     }
 
     return parsed;
@@ -496,6 +510,13 @@ const FakeServerScript = enum {
     /// Drains the request, then sleeps well past the client's injected
     /// timeout without ever responding.
     hang,
+    /// Responds a top-level JSON array — not the `{"result"|"error":...}`
+    /// object shape `request()` expects.
+    top_level_array,
+    /// Responds `{"error":"boom"}` — `error` present but not an object.
+    error_not_object,
+    /// Responds a protocol error object missing `message`.
+    protocol_error_no_message,
 };
 
 /// Set by `fakeServerThread` to whatever request line it drained — lets
@@ -541,6 +562,18 @@ fn fakeServerThread(server: *net.Server, io: Io, script: FakeServerScript) void 
         .close_no_response => {},
         .hang => {
             io.sleep(.fromMilliseconds(300), .awake) catch {};
+        },
+        .top_level_array => {
+            writer.interface.writeAll("[1,2,3]\n") catch return;
+            writer.interface.flush() catch return;
+        },
+        .error_not_object => {
+            writer.interface.writeAll("{\"error\":\"boom\"}\n") catch return;
+            writer.interface.flush() catch return;
+        },
+        .protocol_error_no_message => {
+            writer.interface.writeAll("{\"error\":{\"code\":\"invalid_params\"}}\n") catch return;
+            writer.interface.flush() catch return;
         },
     }
 }
@@ -607,6 +640,65 @@ test "request: ping against a FakeServer that answers in one write" {
     const result = resp.value.object.get("result") orelse return error.UnexpectedResponse;
     const rtype = result.object.get("type") orelse return error.UnexpectedResponse;
     try testing.expectEqualStrings("pong", rtype.string);
+}
+
+test "request: happy path doesn't block for the full read_timeout_ms" {
+    var path_buf: [64]u8 = undefined;
+    var server: net.Server = undefined;
+    const started = try startFakeServer(&server, testing.io, .ping_ok, &path_buf);
+    defer std.Io.Dir.deleteFileAbsolute(testing.io, started.path) catch {};
+    defer server.deinit(testing.io);
+    defer started.thread.join();
+
+    var rpc_err: ?RpcError = null;
+    const start = std.Io.Timestamp.now(testing.io, .awake);
+    const resp = try request(testing.allocator, testing.io, started.path, "ping", .{}, default_read_timeout_ms, &rpc_err);
+    defer resp.deinit();
+    const elapsed = start.durationTo(std.Io.Timestamp.now(testing.io, .awake));
+
+    // Regression guard for the watchdog blocking the happy path for the
+    // full 15s timeout: this must finish in well under 1s of wall time.
+    try testing.expect(elapsed.nanoseconds < std.time.ns_per_s);
+}
+
+test "request: top-level non-object response is error.UnexpectedResponse, no panic" {
+    var path_buf: [64]u8 = undefined;
+    var server: net.Server = undefined;
+    const started = try startFakeServer(&server, testing.io, .top_level_array, &path_buf);
+    defer std.Io.Dir.deleteFileAbsolute(testing.io, started.path) catch {};
+    defer server.deinit(testing.io);
+    defer started.thread.join();
+
+    var rpc_err: ?RpcError = null;
+    const result = request(testing.allocator, testing.io, started.path, "ping", .{}, default_read_timeout_ms, &rpc_err);
+    try testing.expectError(error.UnexpectedResponse, result);
+}
+
+test "request: non-object error field is error.UnexpectedResponse, no panic" {
+    var path_buf: [64]u8 = undefined;
+    var server: net.Server = undefined;
+    const started = try startFakeServer(&server, testing.io, .error_not_object, &path_buf);
+    defer std.Io.Dir.deleteFileAbsolute(testing.io, started.path) catch {};
+    defer server.deinit(testing.io);
+    defer started.thread.join();
+
+    var rpc_err: ?RpcError = null;
+    const result = request(testing.allocator, testing.io, started.path, "ping", .{}, default_read_timeout_ms, &rpc_err);
+    try testing.expectError(error.UnexpectedResponse, result);
+}
+
+test "request: protocol error missing message field doesn't leak the parsed JSON" {
+    var path_buf: [64]u8 = undefined;
+    var server: net.Server = undefined;
+    const started = try startFakeServer(&server, testing.io, .protocol_error_no_message, &path_buf);
+    defer std.Io.Dir.deleteFileAbsolute(testing.io, started.path) catch {};
+    defer server.deinit(testing.io);
+    defer started.thread.join();
+
+    var rpc_err: ?RpcError = null;
+    const result = request(testing.allocator, testing.io, started.path, "ping", .{}, default_read_timeout_ms, &rpc_err);
+    try testing.expectError(error.UnexpectedResponse, result);
+    try testing.expect(rpc_err == null);
 }
 
 test "request: response split across two writes still assembles" {
