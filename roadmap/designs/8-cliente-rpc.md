@@ -52,34 +52,88 @@ instalado (`zig 0.16.0`, `/usr/lib/zig/std/`) y contra el propio `client.zig`.
 | `json.parseFromSlice` / `json.Stringify.value` | `/usr/lib/zig/std/json/static.zig:73` y `/usr/lib/zig/std/json/Stringify.zig:573` | ✅ (ya en uso en `client.zig`) |
 | `std.atomic.Value(T).init` / `.fetchAdd` | `/usr/lib/zig/std/atomic.zig:16` y `:52` | ✅ |
 
-## Decisión de diseño: timeout con `SO_RCVTIMEO`, no un reloj inyectado
+## Decisión de diseño (revisión 2): watchdog de hilo + `shutdown(.recv)`, no `SO_RCVTIMEO`
 
-`std.Io.net.Stream` no expone ninguna variante con timeout para lecturas (`receiveTimeout` solo
-existe en `Socket` para datagramas, `net.zig:1164` — no aplica a `Stream`, que es lo que usa
-`Connection`). `netReadPosix` (`Threaded.zig:12552-12629`) llama a `readv` crudo y solo traduce
-`ETIMEDOUT` si el socket ya tiene `SO_RCVTIMEO` puesto vía `setsockopt` — no hay ningún parámetro de
-`Io.Timeout` que llegue hasta ahí para una `Stream`.
+**La revisión 1 de esta sección (más abajo, tachada por el registro) estaba mal.** Se descubrió en
+el Apply real (`core-builder-fallback`, ver `CONCERNS.md` 2026-08-28 #8): `SO_RCVTIMEO` en Linux
+hace que un `read()`/`readv()` que expira sobre un socket **bloqueante** devuelva `EAGAIN`, no
+`ETIMEDOUT` — `ETIMEDOUT` es de `connect()`, no de lecturas. Y `netReadPosix` trata `EAGAIN` como
+"programmer bug": `errnoBug` hace `std.debug.panic` en modo debug/safe
+(`/usr/lib/zig/std/Io/Threaded.zig:14053-14056`, y el `switch` que lo dispara en
+`Threaded.zig:12619` `.AGAIN => |err| return errnoBug(err)`). Confirmado reproducible: el test de
+timeout abortaba el proceso con `SIGABRT`, no devolvía ningún `error` capturable — ningún `catch`
+en Zig intercepta un `panic`.
 
-Alternativa considerada: pasar un deadline/reloj inyectado y correr un hilo o `select` en paralelo
-para abortar la lectura. Se descarta por YAGNI — es más código (un hilo o un mecanismo de
-cancelación nuevo) para lograr exactamente lo mismo que ya ofrece el kernel: `setsockopt` con
-`SO_RCVTIMEO` es 4 líneas, reusa el `error.Timeout` que `Stream.Reader.Error` ya declara
-(`net.zig:1263-1270`), y cumple el criterio de aceptación tal cual está escrito ("timeout corto
-inyectable" para que el test no duerma de verdad: en el test se pasa `read_timeout_ms` pequeño, p.ej.
-50, y `FakeServer` simplemente no responde).
+Mecanismo corregido, verificado en el mismo Apply: un hilo watchdog que, si el timeout vence antes
+de que la lectura termine, hace `Stream.shutdown(io, .recv)` sobre el mismo socket — comportamiento
+POSIX estándar (no específico de Zig): un `shutdown(fd, SHUT_RD)` sobre un socket con una lectura
+bloqueada en otro hilo hace que esa lectura retorne `0` (EOF) de inmediato. `readVec` ya traduce
+`n == 0` a `error.EndOfStream` (`net.zig`, visto en `Connection.sendRequest`'s pila de lectura) —
+sin tocar `netReadPosix` ni su rama de `AGAIN` para nada.
 
 ```zig
-fn setReadTimeout(handle: net.Socket.Handle, ms: u32) std.posix.SetSockOptError!void {
-    const tv: std.posix.timeval = .{
-        .sec = @intCast(ms / 1000),
-        .usec = @as(i64, @intCast(ms % 1000)) * 1000,
-    };
-    try std.posix.setsockopt(handle, std.posix.SOL.SOCKET, std.posix.SO.RCVTIMEO, std.mem.asBytes(&tv));
-}
+const Watchdog = struct {
+    stream: net.Stream,
+    io: Io,
+    timeout_ms: u32,
+    request_done: std.atomic.Value(bool) = .init(false),
+    fired: std.atomic.Value(bool) = .init(false),
+
+    fn run(self: *@This()) void {
+        Io.sleep(self.io, .fromMilliseconds(self.timeout_ms), .awake) catch return;
+        if (!self.request_done.load(.acquire)) {
+            self.fired.store(true, .release);
+            self.stream.shutdown(self.io, .recv) catch {};
+        }
+    }
+};
+
+// dentro de `request()`, reemplazando el `setReadTimeout` de la revisión 1:
+var wd: Watchdog = .{ .stream = conn.stream, .io = io, .timeout_ms = read_timeout_ms };
+const wd_thread = try std.Thread.spawn(.{}, Watchdog.run, .{&wd});
+
+const line = conn.sendRequest(.{ .id = id, .method = method, .params = params });
+wd.request_done.store(true, .release);
+wd_thread.join();
+
+const line_ok = line catch |err| {
+    if (wd.fired.load(.acquire)) return error.Timeout;
+    return err;
+};
 ```
 
-Se aplica sobre `conn.stream.socket.handle` justo después de `Connection.open`, antes de
-`sendRequest`. Solo afecta lecturas (`RCVTIMEO`), que es lo único que el criterio pide cronometrar.
+Citas nuevas para esta revisión (verificadas por el PM con `sed -n`):
+
+| API | Fuente (`archivo:línea`) | Verificada |
+|---|---|---|
+| `Stream.shutdown(s, io, how) ShutdownError!void` | `/usr/lib/zig/std/Io/net.zig:1252` | ✅ |
+| `ShutdownHow = enum { recv, send, both }` | `/usr/lib/zig/std/Io/net.zig:980` | ✅ |
+| `netReadPosix`: `.AGAIN => |err| return errnoBug(err)` (rama genérica) | `/usr/lib/zig/std/Io/Threaded.zig:12619` | ✅ |
+| `errnoBug`: `std.debug.panic(...)` si `is_debug` | `/usr/lib/zig/std/Io/Threaded.zig:14053-14056` | ✅ |
+| `Io.sleep(io, duration, clock) Cancelable!void` | `/usr/lib/zig/std/Io.zig:2397` | ✅ (ya en uso en `FakeServer`) |
+| `Io.Duration.fromMilliseconds(ms) Duration` | `/usr/lib/zig/std/Io.zig:982` | ✅ (citado por el fallback en su Apply) |
+| `std.Thread.join(self) void` | `/usr/lib/zig/std/Thread.zig:370` | ✅ |
+| `std.Thread.spawn(config, function, args) SpawnError!Thread` | `/usr/lib/zig/std/Thread.zig:344` | ✅ (ya citada) |
+
+Riesgo aceptado: hay una ventana de carrera minúscula entre que `sendRequest` retorna y
+`request_done.store(true, ...)` corre — si el watchdog dispara justo en ese instante, una petición
+que en realidad completó justo en el borde del deadline puede reportarse como `error.Timeout` en
+vez de éxito. Aceptable: es el mismo tipo de carrera que cualquier timeout de red tiene, y el
+criterio de aceptación pide que el timeout ocurra, no que el borde sea exacto al milisegundo.
+
+<details>
+<summary>Revisión 1 (descartada — dejada por trazabilidad, no se implementa)</summary>
+
+`std.Io.net.Stream` no expone ninguna variante con timeout para lecturas (`receiveTimeout` solo
+existe en `Socket` para datagramas, `net.zig:1164` — no aplica a `Stream`). Se intentó
+`setsockopt` con `SO_RCVTIMEO` asumiendo que el kernel traduce el timeout a `ETIMEDOUT` en la
+lectura — la lectura del propio std.zig que decía `.TIMEDOUT => return error.Timeout` (verificada,
+existe en el código) resultó ser una rama muerta para este caso: Linux nunca entrega `ETIMEDOUT` a
+un `read()`/`readv()` sobre socket bloqueante, entrega `EAGAIN`, y esa rama sí es "programmer bug"
+para `netReadPosix`. Cita correcta, conclusión equivocada — la lección para el PM: verificar que la
+rama de código citada es **alcanzable desde el caso de uso real**, no solo que existe.
+
+</details>
 
 ## API nueva en `client.zig`
 
@@ -141,15 +195,21 @@ pub fn request(gpa, io, socket_path, method, params, read_timeout_ms, rpc_err) !
     try conn.open(io, socket_path);
     defer conn.close();
 
-    try setReadTimeout(conn.stream.socket.handle, read_timeout_ms);
-
     var id_buf: [20]u8 = undefined;
     const id = std.fmt.bufPrint(&id_buf, "{d}", .{next_id.fetchAdd(1, .monotonic)}) catch unreachable;
 
-    const line = conn.sendRequest(.{ .id = id, .method = method, .params = params }) catch |err| {
-        if (err == error.ReadFailed) {
-            if (conn.reader.err) |real| if (real == error.Timeout) return error.Timeout;
-        }
+    // Watchdog: ver "Decisión de diseño (revisión 2)" más arriba — SO_RCVTIMEO no
+    // sirve aquí (Linux entrega EAGAIN, no ETIMEDOUT, y netReadPosix trata EAGAIN
+    // como programmer bug y aborta el proceso).
+    var wd: Watchdog = .{ .stream = conn.stream, .io = io, .timeout_ms = read_timeout_ms };
+    const wd_thread = try std.Thread.spawn(.{}, Watchdog.run, .{&wd});
+
+    const send_result = conn.sendRequest(.{ .id = id, .method = method, .params = params });
+    wd.request_done.store(true, .release);
+    wd_thread.join();
+
+    const line = send_result catch |err| {
+        if (wd.fired.load(.acquire)) return error.Timeout;
         return err;
     };
 
