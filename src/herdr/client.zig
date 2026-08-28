@@ -267,6 +267,24 @@ test "ping responds pong with protocol >= 20" {
     try testing.expect(protocol.integer >= 20);
 }
 
+test "request: ping against herdr real returns pong (gated HERDR_ENV=1)" {
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const path = try liveSocketPathOrSkip(&path_buf);
+
+    var rpc_err: ?RpcError = null;
+    const resp = request(testing.allocator, testing.io, path, "ping", .{}, default_read_timeout_ms, &rpc_err) catch |err| {
+        if (err == error.FileNotFound) return error.SkipZigTest; // no live socket here
+        return err;
+    };
+    defer resp.deinit();
+
+    try testing.expect(rpc_err == null);
+    const result = resp.value.object.get("result") orelse return error.UnexpectedResponse;
+    const rtype = result.object.get("type") orelse return error.UnexpectedResponse;
+    try testing.expect(rtype == .string);
+    try testing.expectEqualStrings("pong", rtype.string);
+}
+
 test "session.snapshot returns workspaces with tab_count and pane_count" {
     var path_buf: [std.fs.max_path_bytes]u8 = undefined;
     var conn: Connection = undefined;
@@ -542,8 +560,8 @@ fn startFakeServer(
 ) !struct { path: []const u8, thread: std.Thread } {
     const path = try std.fmt.bufPrint(
         path_buf,
-        "/tmp/kelpie-herdr-fake-{d}.sock",
-        .{fake_server_next_id.fetchAdd(1, .monotonic)},
+        "/tmp/kelpie-herdr-fake-{d}-{d}.sock",
+        .{ std.posix.system.getpid(), fake_server_next_id.fetchAdd(1, .monotonic) },
     );
     const addr = try net.UnixAddress.init(path);
     server.* = try addr.listen(io, .{});
