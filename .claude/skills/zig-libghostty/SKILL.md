@@ -39,6 +39,11 @@ try list.append(gpa, 42);
 - Dependencias: `zig fetch --save=<nombre> <url.tar.gz>` calcula el hash; nunca se escribe a mano.
 - `build.zig`: `b.addExecutable(.{ .name, .root_module = b.createModule(.{ .root_source_file, .target, .optimize, .imports }) })`.
 - Tests: bloques `test` en el archivo + `b.addTest(.{ .root_module })`; `std.testing.allocator` detecta fugas.
+- Un literal de struct con un campo falible NO es atómico: por result-location, los campos
+  anteriores ya están escritos en el destino final cuando el `try` falla. Si el destino sobrevive
+  al error (out-param, campo persistente), evalúa el campo falible en un local ANTES del literal.
+  Tercera vez en este repo con la misma raíz: `Connection.open`, `openLive`, y `request()` (#8,
+  corregido en `src/herdr/client.zig:218-222`).
 - `zig fmt --check build.zig build.zig.zon src` es parte del CI: formatea antes de commitear.
 
 ## ghostty-vt como módulo Zig

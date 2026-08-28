@@ -26,3 +26,34 @@ esperado del servidor, no un bug del cliente.
 
 `events.subscribe` es la única excepción: es un stream persistente que se mantiene abierto y va
 emitiendo líneas NDJSON de eventos mientras la conexión siga viva.
+
+## `request()` — una petición de un tiro
+
+`request(gpa, io, socket_path, method, params, read_timeout_ms, rpc_err)` abre una `Connection`
+nueva, envía `method`/`params`, lee una línea de respuesta y cierra — el patrón de "una conexión
+por petición" de arriba, hecho función. `rpc_err.*` se resetea a `null` al entrar; si herdr responde
+con un error de protocolo (`{"error":{code,message}}`), `request` devuelve `error.HerdrRpc` y deja
+el detalle en `rpc_err.*` (el llamador lo libera con `.deinit(gpa)` solo si no es `null`). En el
+camino feliz el llamador es dueño del `Response` devuelto y debe `.deinit()` lo.
+
+`read_timeout_ms` es inyectable (usa `default_read_timeout_ms` = 15 s si no hace falta uno corto).
+Se implementa con un hilo watchdog, no `SO_RCVTIMEO`: en Linux un `read()`/`readv()` bloqueante
+que expira por `SO_RCVTIMEO` entrega `EAGAIN`, no `ETIMEDOUT`, y el backend `Threaded` de `std.Io`
+trata `EAGAIN` sobre un socket bloqueante como "programmer bug" y aborta el proceso — ver
+`roadmap/designs/8-cliente-rpc.md`, sección "Decisión de diseño (revisión 2)". El watchdog duerme
+`read_timeout_ms` y, si la lectura no terminó, hace `Stream.shutdown(io, .recv)` sobre el socket:
+un `shutdown(SHUT_RD)` estándar de POSIX hace que la lectura bloqueada en el otro hilo retorne EOF
+de inmediato, que se traduce a `error.Timeout` en `request()`.
+
+## `RpcErrorCode`
+
+Códigos de error de protocolo que herdr puede devolver en `{"error":{"code": ...}}`:
+`invalid_request`, `invalid_params`, `agent_blocked`, `agent_not_ready`, `pane_not_found`,
+`invalid_target`, `ui_busy`, `protocol_mismatch`, y `unknown` para cualquier código que este cliente
+no reconozca todavía (el mensaje crudo sigue disponible en `RpcError.message`).
+
+## `resolveSocketPath` — tres escalones
+
+1. `HERDR_SOCKET_PATH`, verbatim, si está puesto.
+2. `$XDG_CONFIG_HOME/herdr/herdr.sock`, si `XDG_CONFIG_HOME` está puesto.
+3. `$HOME/.config/herdr/herdr.sock`, como último recurso.

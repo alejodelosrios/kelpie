@@ -93,3 +93,30 @@ Formato: `- [YYYY-MM-DD] #issue — qué se vio · por qué no se arregló ahora
   (documentada con `hyprctl`/`wtype`/`grim`, no automatizable en CI headless — declarado en el propio
   diseño) · el quinto barato que sí sería automatizable (comparar el `app_id` contra la constante) no
   se escribió · dispara con el próximo issue de `src/ui/`: añadir ese test puntual.
+- [2026-08-28] #8 — `core-builder` (OpenCode+MiMo) falló el Apply real dos veces seguidas con el
+  diseño aprobado (`roadmap/designs/8-cliente-rpc.md`): 0 bytes de log, 0 diff en ambos intentos ·
+  reincidencia exacta de las filas `#4`/`#5 · Motor / capacidad` de `lessons-learned.md` — no aporta
+  regla nueva, por eso no entra ahí, solo aquí como constancia · se escaló a
+  `core-builder-fallback` (Claude) sin más reintentos con MiMo, por la regla ya escrita: "0 bytes,
+  0 diff" es la señal de ir a fallback, no de esperar más · dispara si un tercer issue en la misma
+  ola repite el patrón: dejar de tratarlo como reincidencia aislada y abrir issue dedicado a
+  investigar la causa raíz de MiMo en esta máquina (coincide con el hijo de #13 fallando en
+  paralelo con el mismo síntoma).
+- [2026-08-28] #8 — el guard de regresión de memoria del camino nuevo (`openForRequestGuardTest`,
+  `src/herdr/client.zig`) prueba una réplica del setup de `request()`, no el `request()` real — si
+  `request()` cambia su patrón de apertura de `Connection`, el guard sigue verde sin detectarlo ·
+  no se resolvió porque exponer el `conn` interno de `request()` para un test externo requeriría
+  cambiar la firma pública o una función de test-only más invasiva, y el patrón hoy es idéntico ·
+  dispara si `request()` cambia cómo abre `Connection`: mover el guard a inspeccionar el `request()`
+  real, no una copia.
+- [2026-08-28] #8 — `last_received_line_buf` (test-only, `src/herdr/client.zig`) tiene una carrera de
+  datos formal: se escribe desde el hilo del `FakeServer` y se lee desde el test antes de su
+  `defer thread.join()` diferido — en la práctica el orden lo impone el ida y vuelta del socket, pero
+  no hay happens-before declarado · no se resolvió porque no afecta código de producción, solo un
+  test · dispara si `zig build test` empieza a fallar de forma intermitente en ese test específico:
+  mover la lectura después del `join()` explícito, no confiar en el orden implícito.
+- [2026-08-28] #8 — `request()` mete un `Connection` de 128 KiB (`read_buf`+`write_buf`, 64 KiB cada
+  uno) en su propio frame de pila · aceptado porque el hilo de GTK tiene pila de sobra, pero no se
+  verificó para ningún otro contexto de llamada · dispara si `request()` se llama algún día desde un
+  hilo con pila reducida (p.ej. un hilo worker con stack_size explícito bajo): mover `Connection` a
+  heap o reducir sus buffers para esa ruta.
