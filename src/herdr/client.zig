@@ -130,7 +130,11 @@ var next_id: std.atomic.Value(u64) = .init(1);
 const Watchdog = struct {
     stream: net.Stream,
     io: Io,
-    timeout_ms: u32,
+    // `u64`, not `u32`, even though `request()`'s `read_timeout_ms` param is
+    // `u32`: `elapsed_ms += slice_ms` below would overflow a `u32` for a
+    // timeout near ~49.7 days of milliseconds. Cheap to avoid entirely by
+    // widening this one field instead of bounding the loop.
+    timeout_ms: u64,
     request_done: std.atomic.Value(bool) = .init(false),
     fired: std.atomic.Value(bool) = .init(false),
 
@@ -138,11 +142,11 @@ const Watchdog = struct {
         // Sleep in short slices instead of one `timeout_ms`-long sleep, so
         // the happy path (request finishes well under the deadline) doesn't
         // force `wd_thread.join()` to wait out the full timeout.
-        const slice_ms: u32 = 10;
-        var elapsed_ms: u32 = 0;
+        const slice_ms: u64 = 10;
+        var elapsed_ms: u64 = 0;
         while (elapsed_ms < self.timeout_ms) : (elapsed_ms += slice_ms) {
             if (self.request_done.load(.acquire)) return;
-            Io.sleep(self.io, .fromMilliseconds(@min(slice_ms, self.timeout_ms - elapsed_ms)), .awake) catch return;
+            Io.sleep(self.io, .fromMilliseconds(@intCast(@min(slice_ms, self.timeout_ms - elapsed_ms))), .awake) catch return;
         }
         if (!self.request_done.load(.acquire)) {
             self.fired.store(true, .release);
@@ -156,11 +160,13 @@ const Watchdog = struct {
 /// closes after answering any non-subscription method, so a connection per
 /// request is the only shape that works here.
 ///
-/// `rpc_err.*` is reset to `null` up front. On a protocol-level error
-/// response (`{"error":{code,message}}`) this returns `error.HerdrRpc` and
-/// leaves the detail in `rpc_err.*` — the caller must `.deinit(gpa)` it only
-/// when it's non-null. On success the caller owns the returned `Response`
-/// and must `.deinit()` it.
+/// `rpc_err.*` is reset to `null` up front. Invariant: `rpc_err.*` is
+/// non-`null` **if and only if** this returns `error.HerdrRpc` — any other
+/// return (success or any other error, including `error.OutOfMemory` while
+/// building `rpc_err.*` itself) leaves it `null`. So the caller only ever
+/// needs `.deinit(gpa)` on it after catching `error.HerdrRpc` specifically.
+/// On success the caller owns the returned `Response` and must `.deinit()`
+/// it.
 pub fn request(
     gpa: std.mem.Allocator,
     io: Io,
@@ -203,9 +209,16 @@ pub fn request(
         const msg_val = err_obj.object.get("message") orelse return error.UnexpectedResponse;
         if (msg_val != .string) return error.UnexpectedResponse;
 
+        // `gpa.dupe` must be evaluated *before* the struct literal is written
+        // into `rpc_err.*` — Zig's result-location semantics write `.code`
+        // directly into `rpc_err.*` first, so if this `try` failed inline in
+        // the literal, `rpc_err.*` would be left non-null with `.message`
+        // pointing at uninitialized memory (the caller's `.deinit(gpa)` on
+        // that garbage pointer is heap corruption, not a catchable error).
+        const message = try gpa.dupe(u8, msg_val.string);
         rpc_err.* = .{
             .code = std.meta.stringToEnum(RpcErrorCode, code_val.string) orelse .unknown,
-            .message = try gpa.dupe(u8, msg_val.string),
+            .message = message,
         };
         return error.HerdrRpc; // `errdefer` above frees `parsed` on this path.
     }
@@ -699,6 +712,36 @@ test "request: protocol error missing message field doesn't leak the parsed JSON
     const result = request(testing.allocator, testing.io, started.path, "ping", .{}, default_read_timeout_ms, &rpc_err);
     try testing.expectError(error.UnexpectedResponse, result);
     try testing.expect(rpc_err == null);
+}
+
+test "request: OutOfMemory while building rpc_err never leaves rpc_err non-null" {
+    // Sweeps `FailingAllocator.fail_index` across every allocation `request()`
+    // makes on the `.protocol_error` path (json parse tree + the `code`/
+    // `message` dupe) — regression for the bug where `rpc_err.*` got a valid
+    // `.code` written before the `.message` dupe's `try` could fail, leaving
+    // a garbage `.message` pointer behind for the caller to `.deinit()`.
+    var fail_index: usize = 0;
+    while (fail_index < 30) : (fail_index += 1) {
+        var path_buf: [64]u8 = undefined;
+        var server: net.Server = undefined;
+        const started = try startFakeServer(&server, testing.io, .protocol_error, &path_buf);
+        defer std.Io.Dir.deleteFileAbsolute(testing.io, started.path) catch {};
+        defer server.deinit(testing.io);
+        defer started.thread.join();
+
+        var failing = testing.FailingAllocator.init(testing.allocator, .{ .fail_index = fail_index });
+        var rpc_err: ?RpcError = null;
+        const result = request(failing.allocator(), testing.io, started.path, "ping", .{}, default_read_timeout_ms, &rpc_err);
+
+        if (result) |resp| {
+            resp.deinit();
+            try testing.expect(rpc_err == null);
+        } else |err| switch (err) {
+            error.HerdrRpc => (rpc_err orelse return error.UnexpectedResponse).deinit(testing.allocator),
+            error.OutOfMemory => try testing.expect(rpc_err == null),
+            else => return err,
+        }
+    }
 }
 
 test "request: response split across two writes still assembles" {
