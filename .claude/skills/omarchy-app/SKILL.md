@@ -97,15 +97,33 @@ omarchy notification send --app-name kelpie -g <glifo> -u critical|normal -r <id
 omarchy notification dismiss "<substring del headline>"
 ```
 
+- **Invocar `omarchy-notification-send` directo, no `omarchy notification send`** (#6). El dispatcher
+  escanea **todo** el remanente de la línea buscando `-h`/`--help` para no perderlos
+  (`/usr/share/omarchy/bin/omarchy:128-137`), así que un `-h` dentro del argv de `--exec` se lo traga
+  el dispatcher y sale la ayuda. El escaneo sí para en un `--`, pero el binario directo evita el
+  problema entero.
 - `--exec` va **al final** y consume el resto de la línea como argv; se ejecuta como parámetros
   posicionales de bash (`Util.qml:57-64`). Nunca se concatena texto de agentes o rutas en un string.
+  Verificado end-to-end en #6: el argv llega literal (espacios respetados, `$(id)` sin expandir) y
+  **sobrevive un `omarchy restart shell`** — la acción es dato (el hint `omarchy-exec-argv`), no un
+  callback en memoria.
 - `--app-name` por defecto es `omarchy-action`, que **salta no-molestar** y marca la toast efímera.
   kelpie pasa siempre `--app-name kelpie`; el usuario que activó DND no ve toasts.
 - `-r` es **numérico**: la primera vez se envía con `-p`, se guarda el id por (device, pane) y se
   reenvía con `-r <id>` para no apilar toasts del mismo agente.
 - `-u critical` solo para bloqueado; `normal` para terminado. `-t` en ms.
+  **`normal` expira sola a los 8000 ms**; solo `Critical` devuelve duración `0`
+  (`shell/plugins/notifications/Service.qml:98-105`). Una toast de urgencia `normal` que espera un
+  click humano ya no está ahí cuando llega — costó dos falsos negativos en #6.
 - `dismiss` es substring case-sensitive sobre los popups visibles: el headline lleva un marcador
-  estable por agente.
+  estable por agente. **Nunca imprime nada**: `omarchy-notification-dismiss` llama `omarchy-shell -q`
+  (`-q` = quiet), así que el criterio de éxito es que la toast desaparezca de pantalla, no la salida
+  del comando.
+- **Probar el click sin humano**: `omarchy-shell notifications invokeLast` llama al mismo
+  `invokePopupDefault` que dispara `onCardClicked` (`Service.qml:904-906`, `:360`, `:1056`). Sirve de
+  aserción automática en un test de notificaciones.
+- `omarchy restart shell` a veces imprime "did not become ready" aunque el shell vuelva funcional
+  segundos después: es un timeout de arranque optimista del propio comando, no un fallo.
 
 ## 3. Plugin de barra (Quickshell 0.3.1)
 
