@@ -137,13 +137,34 @@ es un Apply que nunca ocurrió — el PM lo rechaza y lo manda al builder.
 Si un issue cruza territorios (p.ej. #35 lleva `area:ssh` + `area:ui`), **secuencia**: primero core,
 verificas, commiteas, luego ui. Nunca los dos a la vez sobre el mismo checkout.
 
-Lanza con el diseño aprobado como orden:
+Lanza con el diseño aprobado como orden. **Dos detalles de la invocación no son opcionales**, y
+los dos se aprendieron midiendo (Ola 1 de M1):
 
 ```sh
-opencode run --agent <builder> "$(cat roadmap/designs/<N>-<slug>.md)
+script -qefc "opencode run --agent <builder> \"$(cat roadmap/designs/<N>-<slug>.md)
 
-Implementa esta spec. Reporta la tabla de citas obligatoria."
+Implementa esta spec. Reporta la tabla de citas obligatoria.\"" apply-<N>.log
 ```
+
+1. **Va bajo `script` (pseudo-TTY), nunca por una tubería pelada.** OpenCode **bufferea su stdout por
+   bloques cuando no escribe a una TTY**: medido, un run matado a los 15 s deja **42 bytes** de log
+   (solo la cabecera) por una tubería, y ~11× más bajo `script`. `stdbuf -oL` **no** sirve — no usa
+   stdio de libc. Sin el pty, un builder que trabaja bien se ve exactamente igual que uno colgado.
+2. **El timeout se calcula, no se copia.** En este repo un Apply real cuesta: prompt del diseño
+   (cientos de líneas) + una verificación `sed` por cada firma de la tabla + `zig build` (~75 s en
+   frío) + `zig build test` (**~92 s de reloj**), y **dentro de un worktree todo va ~2× más lento**
+   (medido: 24 s → 54 s en la misma tarea trivial). `timeout 900` mata a un builder sano a mitad de
+   la verificación. Usa **2400 s** como base y súbelo si el diseño tiene tabla de citas larga.
+
+**El progreso NO se mide en bytes de log.** Se mide en el árbol:
+
+```sh
+git -C <worktree> status --short     # ¿aparecieron archivos?
+find <worktree>/src -newer <marca> ! -path "*/.zig-cache/*"   # ¿se tocó algo?
+```
+
+Un log vacío con `git status` vacío **a los 40 min** es un builder muerto. Un log vacío a los 10 min
+no es nada: es el buffer.
 
 ## FASE 5 — Verificación sobre confianza
 
@@ -166,6 +187,16 @@ El reporte del builder **no es evidencia**. En este orden:
    (`core-builder-fallback` / `ui-builder-fallback`). Incrementa `intentos_apply` en el state file y
    anota el motivo en `CONCERNS.md`. **Dos fallbacks seguidos en el mismo issue → párate y avisa al
    humano**: el problema es la spec, no el modelo.
+
+   **Antes de declarar un fallback por "el builder no produjo nada", comprueba las dos causas
+   instrumentales primero** — en la Ola 1 de M1 las dos se confundieron con un motor roto y costaron
+   dos fallbacks innecesarios:
+   - ¿lo lanzaste **sin `script`**? Entonces el log vacío es el buffer, no el builder.
+   - ¿lo mataste con **`timeout 900`**? Entonces lo mataste tú a mitad de trabajo; el log de #13
+     terminaba en seco dentro de un `sed` de verificación, sin un solo error.
+
+   Un Apply incompleto (archivos del diseño que faltan en el diff) **sí** es fallback legítimo:
+   ahí el builder terminó y entregó de menos.
 
 ## FASE 6 — QA (subagente Claude `qa`)
 
