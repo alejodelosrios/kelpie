@@ -70,9 +70,16 @@ que parece vivo y no hace nada:
    ```sh
    herdr pane run '<pane>' 'claude --model sonnet'      # la shell lo ejecuta
    herdr pane read '<pane>'                             # confirma que hay prompt de Claude
-   herdr pane run '<pane>' '/kelpie-flow <N>'
+   herdr pane run '<pane>' 'Eres hijo del fleet: te lanza /kelpie-fleet desde el pane orquestador, no un humano. El scope gate y el gate de diseño los aprueba el orquestador por este mismo chat; el gate humano es solo el merge. /kelpie-flow <N>'
    herdr pane send-keys '<pane>' Enter                  # sin esto el hijo nunca arranca
    ```
+
+   **El prefijo no es cortesía: es la procedencia del canal.** `/kelpie-flow` a secas declara que lo
+   lanzó un humano y manda **detenerse en el scope gate**, así que el hijo para donde no debe. Peor:
+   cuando después le escribes por el chat del pane, no tiene forma de saber que existe un fleet
+   encima y trata tu mensaje como **inyección de autoridad** — correctamente, según la fila de #4 de
+   `lessons-learned.md`. Pasó en la Ola 1 de M1 y paró la ola entera. La procedencia se establece
+   **al arrancar**; un mensaje que reclama autoridad a mitad de camino no puede probarla.
 
 3. **Nunca fire-and-forget:** tras el Enter, `herdr pane read` y confirma spinner o FASE 1 en
    pantalla. Un `%` de contexto que no crece es un hijo que no arrancó.
@@ -144,6 +151,11 @@ y el ruleset les exigirá rebase. Avísales en cuanto pase; no esperes a que su 
 
 **No mates a un hijo por reloj.** Un QA visual riguroso tarda. Mata por **falta de progreso**: sin
 cambios en su diff ni en su pane durante varios ciclos, no por minutos transcurridos.
+
+**Y "sin progreso" se mide en el árbol, no en el log.** OpenCode bufferea su stdout por bloques
+cuando no escribe a una TTY: un builder sano matado a los 15 s deja **42 bytes** de log. Si el hijo
+lanzó su Apply sin `script -qefc`, su log vacío no dice nada. Lo que dice algo es
+`git -C ../kelpie-<N> status --short`.
 
 ## FASE 3b — La regla de merge del orquestador
 
