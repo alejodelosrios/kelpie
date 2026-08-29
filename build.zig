@@ -44,6 +44,10 @@ pub fn build(b: *std.Build) void {
         }
     }
 
+    // kelpie.css fallback (#14): embedded data, not code — the only place hex colors
+    // are allowed (ADR-0001 §5). Lives in data/ so `grep src/` for hex stays clean.
+    exe_mod.addAnonymousImport("kelpie-fallback-css", .{ .root_source_file = b.path("data/kelpie-fallback.css") });
+
     const exe = b.addExecutable(.{
         .name = "kelpie",
         .root_module = exe_mod,
