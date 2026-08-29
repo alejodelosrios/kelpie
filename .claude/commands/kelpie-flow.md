@@ -198,8 +198,28 @@ Pásale también `lessons-learned.md`: una de sus tareas es **cruzar el diff con
 3. Commit convencional que explica el **por qué**, no el qué.
 4. `git push -u origin <rama>` y `gh pr create --base develop --fill --body "Cierra #<N>."`
    con el diseño enlazado y el veredicto del auditor en el cuerpo.
-5. **Espera el CI**: `gh pr checks --watch`. El ruleset de GitHub bloquea el merge sin `build` verde
-   y exige la rama al día con `develop` — si pide rebase, rebasea.
+5. **Espera el CI**: `gh pr checks --watch`.
+
+   > ### 🔴 NADA SE MERGEA EN ROJO. Sin excepción, sin urgencia que valga.
+   >
+   > Un CI rojo es un hallazgo, no un trámite: **diagnostícalo y arréglalo**. Nunca se mergea
+   > "porque en local pasaba" — que compile en tu máquina y falle en el runner **es justo el bug**,
+   > no ruido del CI. Tampoco se re-lanza el job esperando que salga verde por suerte.
+   >
+   > **Verifica el CI del HEAD ACTUAL, no de un commit anterior.** Este es el error caro: un
+   > `mergeStateStatus: CLEAN` puede venir del commit de hace dos pushes mientras el head nuevo
+   > todavía compila. La condición de merge tiene tres partes, y las tres a la vez:
+   > 1. `mergeStateStatus == CLEAN`,
+   > 2. **todos** los checks con `conclusion == SUCCESS` — ninguno en `PENDING`/`IN_PROGRESS`,
+   > 3. `0` commits detrás de `develop`.
+   >
+   > ```sh
+   > gh pr view <PR> --json state,mergeStateStatus,statusCheckRollup \
+   >   -q '"merge=\(.mergeStateStatus) checks=\([.statusCheckRollup[]?|"\(.name):\(.status):\(.conclusion // "-")"]|join(","))"'
+   > ```
+   >
+   > El ruleset de GitHub bloquea el merge sin `build` verde y exige la rama al día — pero **la
+   > regla no depende del ruleset**: si mañana alguien afloja la protección, esto sigue vigente.
 6. **DETENTE. El merge lo aprueba el humano.** Es el gate final del dueño.
 7. Tras el merge: `gh issue close <N>`, borra la rama, y si corrías en worktree,
    `git worktree remove` (lo hace el orquestador del fleet). Cierra el state file.
