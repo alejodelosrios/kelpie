@@ -36,6 +36,15 @@ dueño de #2):
   `Iterator.next() ?CssVar{name, value}`: parser de declaraciones `--nombre: valor;` sobre un
   bloque CSS arbitrario. Sin dependencia de GTK — texto puro. Es lo que pide el criterio de
   aceptación "test del parser… (usado por #26)"; #26 no se implementa aquí.
+- `build.zig` — **enmendado post-Apply** (no estaba en la lista original de este diseño; añadido
+  aquí para que el contrato refleje lo mergeado, per hallazgo del auditor): dos líneas, sin tocar
+  `build.zig.zon` ni el commit pinneado de ghostty. (1) `exe_mod.addAnonymousImport("kelpie-fallback-css",
+  .{ .root_source_file = b.path("data/kelpie-fallback.css") })` — necesario para que
+  `@embedFile("kelpie-fallback-css")` en `app_shell.zig` alcance un archivo fuera de `src/`; se probó
+  empíricamente que `zig build` funciona igual sin tocar `build.zig.zon` (revertido tras probarlo).
+  (2) un `addTest` independiente para `src/ui/theme_css.zig` (mismo patrón que `vt_spike_mod`, ya
+  existente en el archivo): sin él, sus tests no son alcanzables por ningún `@import` desde el
+  módulo raíz y `zig build test` no los compila ni corre — lo encontró QA.
 
 **No entra** (copiado del issue, más lo recortado por YAGNI):
 - Recarga en vivo del `GFileMonitor` al cambiar de tema (#15): hoy la hoja se lee una vez en

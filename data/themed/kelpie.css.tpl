@@ -1,7 +1,8 @@
 /* kelpie.css.tpl — Omarchy theme template for kelpie
  *
  * This file is processed by `omarchy-theme-set-templates` via sed.
- * Tokens: {{ token }} → hex value. Content transcribed verbatim from issue #14.
+ * Uses Omarchy's double-brace token syntax (a token name wrapped in double curly
+ * braces resolves to its hex value). Content transcribed verbatim from issue #14.
  *
  * Blocks:
  *   a) libadwaita :root overrides (headerbar, sidebar, accent, etc.)
