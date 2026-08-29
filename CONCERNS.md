@@ -138,3 +138,27 @@ Formato: `- [YYYY-MM-DD] #issue — qué se vio · por qué no se arregló ahora
   diferencia de entorno más probable entre la máquina del humano y CI: una captura con fallback en
   vez del tema activo puede parecer un bug de #14 cuando es solo un `$XDG_STATE_HOME` apuntando a
   otro lado.
+- [2026-08-28] #9 — `src/herdr/types.zig` (test de conformidad) toma `Pong` como
+  `one_of.array.items[0]` de `ResponseResult.oneOf`, asumiendo que la respuesta de `pong` siempre es
+  el primer elemento del `oneOf` · no se resolvió porque hoy es cierto y cambiar a búsqueda por
+  `properties.type.const == "pong"` es más código para un caso que no ha ocurrido · dispara si
+  `scripts/update-schema.sh` regenera el schema con otro orden en `oneOf`: buscar el miembro por su
+  discriminante `type` en vez de indexar por posición.
+- [2026-08-28] #9 — el test `"required-field checker fails when a required field is renamed"`
+  (`src/herdr/types.zig`) usa `std.heap.page_allocator` en vez de `testing.allocator` · verificado
+  que hoy no oculta ninguna fuga (correr con `testing.allocator` sigue en verde) · no se cambió
+  porque no es bloqueante y no hay fuga real que ocultar hoy · dispara si ese test empieza a crecer
+  o a mutar más estado: cambiarlo a `testing.allocator` activa el detector de fugas para el futuro.
+- [2026-08-28] #9 — `RequiredCheck.check` (`src/herdr/types.zig`) valida solo que el **nombre** de
+  cada campo `required` del schema exista como campo del struct Zig — no valida tipo ni que el
+  campo sea no-opcional · aceptado como el techo declarado del diseño (issue #9 pide "existencia",
+  no un chequeo de tipos) · dispara si algún día se necesita detectar que un campo `required` del
+  schema se volvió `?T = null` en el struct por error: habría que comparar también
+  `field.default_value_ptr == null` para esos nombres.
+- [2026-08-30] #14 — la paleta de `data/kelpie-fallback.css` es byte a byte la de Catppuccin Mocha
+  (`--window-bg-color: #1e1e2e`, `--headerbar-bg-color: #313244`, `--accent-bg-color: #89b4fa`), así
+  que con Catppuccin activo **no se distingue si cargó el tema o el fallback**: la verificación
+  visual del criterio 2 fue ciega hasta que se repitió con `gruvbox` · no se cambió porque el
+  fallback funciona y la paleta es una elección estética que el issue no fija · dispara la próxima
+  vez que alguien verifique tematización a ojo: darle al fallback una paleta que no coincida con
+  ningún tema instalado de Omarchy, para que "cargó el fallback" sea visible sin leer el log.
