@@ -2,6 +2,7 @@ const std = @import("std");
 const Io = std.Io;
 const json = std.json;
 const client = @import("client.zig");
+const types = @import("types.zig");
 
 const log = std.log.scoped(.herdr_probe);
 
@@ -332,6 +333,7 @@ fn takeLine(r: *std.Io.Reader) ![]u8 {
 // this, `client.zig`'s tests would silently never run under `zig build test`.
 test {
     _ = client;
+    _ = types;
 }
 
 // ---------------------------------------------------------------------------
