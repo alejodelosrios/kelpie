@@ -301,3 +301,54 @@ test "AgentInfo optional fields default to null" {
     try testing.expect(parsed.value.terminal_title_stripped == null);
     try testing.expectEqual(0, parsed.value.state_change_seq);
 }
+
+test "required-field checker fails when a required field is renamed" {
+    // Escenario Gherkin: "zig build test falla si se renombra un campo
+    // requerido de AgentInfo" — la mitad negativa (la mitad positiva ya la
+    // ejercita "types match herdr-api.schema.json required fields and enum
+    // values" arriba, pasando la lista real). Esta prueba duplica localmente
+    // la misma lógica de comparación que RequiredCheck.check para confirmar
+    // que la rama `error.MissingRequiredField` es alcanzable de forma
+    // automática y repetible, sin depender de una edición manual del schema.
+    const gpa = std.heap.page_allocator;
+    const schema_bytes = @embedFile("testdata/herdr-api.schema.json");
+    const parsed = try json.parseFromSlice(json.Value, gpa, schema_bytes, .{});
+    defer parsed.deinit();
+
+    const root = parsed.value.object;
+    const schemas = root.get("schemas").?;
+    const success_response = schemas.object.get("success_response").?;
+    const defs = success_response.object.get("$defs").?;
+
+    const RequiredCheck = struct {
+        fn check(defs_obj: json.Value, type_name: []const u8, comptime fields: []const []const u8) !void {
+            const def = defs_obj.object.get(type_name).?;
+            const required = def.object.get("required").?;
+            var schema_fields: [fields.len][]const u8 = undefined;
+            for (required.array.items, 0..) |item, i| {
+                schema_fields[i] = item.string;
+            }
+            inline for (fields) |expected| {
+                var found = false;
+                for (schema_fields) |actual| {
+                    if (std.mem.eql(u8, actual, expected)) {
+                        found = true;
+                        break;
+                    }
+                }
+                if (!found) return error.MissingRequiredField;
+            }
+        }
+    };
+
+    // "pane_id" renombrado a "pane_id_renamed" — no existe en el schema real.
+    const result = RequiredCheck.check(defs, "AgentInfo", &.{
+        "terminal_id", "agent_status", "workspace_id", "tab_id", "pane_id_renamed", "focused", "revision",
+    });
+    try testing.expectError(error.MissingRequiredField, result);
+
+    // La lista real (sin renombrar) sigue pasando sin error.
+    try RequiredCheck.check(defs, "AgentInfo", &.{
+        "terminal_id", "agent_status", "workspace_id", "tab_id", "pane_id", "focused", "revision",
+    });
+}
