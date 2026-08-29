@@ -131,6 +131,7 @@ pub const SessionSnapshot = struct {
 };
 
 pub const Pong = struct {
+    type: []const u8,
     version: []const u8,
     protocol: u32,
     capabilities: ?json.Value = null,
@@ -155,14 +156,39 @@ fn freeAllocated(allocator: std.mem.Allocator, token: json.Scanner.Token) void {
 }
 
 // ---------------------------------------------------------------------------
+// Required-field checker — shared by conformance and regression tests
+// ---------------------------------------------------------------------------
+
+const RequiredCheck = struct {
+    /// Validates that every field listed in the schema's `required` array
+    /// exists as a real field on the Zig struct `T`. `@hasField` can't take a
+    /// runtime name, so this walks `@typeInfo(T).@"struct".fields` (comptime)
+    /// and compares each field name against the runtime string — renames or
+    /// missing fields in the struct are caught at test time either way.
+    fn check(comptime T: type, defs_obj: json.Value, type_name: []const u8) !void {
+        const def = defs_obj.object.get(type_name).?;
+        const required = def.object.get("required").?;
+        for (required.array.items) |item| {
+            const name = item.string;
+            var found = false;
+            inline for (@typeInfo(T).@"struct".fields) |field| {
+                if (std.mem.eql(u8, field.name, name)) {
+                    found = true;
+                }
+            }
+            if (!found) return error.MissingStructField;
+        }
+    }
+};
+
+// ---------------------------------------------------------------------------
 // Conformance test — validates types against testdata/herdr-api.schema.json
 // ---------------------------------------------------------------------------
 
 test "types match herdr-api.schema.json required fields and enum values" {
-    const gpa = std.heap.page_allocator;
     const schema_bytes = @embedFile("testdata/herdr-api.schema.json");
 
-    const parsed = try json.parseFromSlice(json.Value, gpa, schema_bytes, .{});
+    const parsed = try json.parseFromSlice(json.Value, testing.allocator, schema_bytes, .{});
     defer parsed.deinit();
 
     const root = parsed.value.object;
@@ -172,69 +198,51 @@ test "types match herdr-api.schema.json required fields and enum values" {
     const event_schema = schemas.object.get("event").?;
     const event_defs = event_schema.object.get("$defs").?;
 
-    // Helper: extract required field names from a schema definition.
-    const RequiredCheck = struct {
-        fn check(defs_obj: json.Value, type_name: []const u8, comptime fields: []const []const u8) !void {
-            const def = defs_obj.object.get(type_name).?;
-            const required = def.object.get("required").?;
-            var schema_fields: [fields.len][]const u8 = undefined;
-            for (required.array.items, 0..) |item, i| {
-                schema_fields[i] = item.string;
-            }
-            inline for (fields) |expected| {
-                var found = false;
-                for (schema_fields) |actual| {
-                    if (std.mem.eql(u8, actual, expected)) {
-                        found = true;
-                        break;
-                    }
-                }
-                if (!found) return error.MissingRequiredField;
-            }
-        }
-    };
+    // AgentInfo
+    try RequiredCheck.check(AgentInfo, defs, "AgentInfo");
 
-    // AgentInfo: 7 required fields
-    try RequiredCheck.check(defs, "AgentInfo", &.{
-        "terminal_id", "agent_status", "workspace_id", "tab_id", "pane_id", "focused", "revision",
-    });
+    // PaneInfo
+    try RequiredCheck.check(PaneInfo, defs, "PaneInfo");
 
-    // PaneInfo: 7 required fields
-    try RequiredCheck.check(defs, "PaneInfo", &.{
-        "pane_id", "terminal_id", "workspace_id", "tab_id", "focused", "agent_status", "revision",
-    });
+    // TabInfo
+    try RequiredCheck.check(TabInfo, defs, "TabInfo");
 
-    // TabInfo: 7 required fields (all properties are required)
-    try RequiredCheck.check(defs, "TabInfo", &.{
-        "tab_id", "workspace_id", "number", "label", "focused", "pane_count", "agent_status",
-    });
+    // WorkspaceInfo
+    try RequiredCheck.check(WorkspaceInfo, defs, "WorkspaceInfo");
 
-    // WorkspaceInfo: 8 required fields (all properties are required)
-    try RequiredCheck.check(defs, "WorkspaceInfo", &.{
-        "workspace_id", "number", "label", "focused", "pane_count", "tab_count", "active_tab_id", "agent_status",
-    });
+    // SessionSnapshot
+    try RequiredCheck.check(SessionSnapshot, defs, "SessionSnapshot");
 
-    // SessionSnapshot: 7 required fields
-    try RequiredCheck.check(defs, "SessionSnapshot", &.{
-        "version", "protocol", "workspaces", "tabs", "panes", "layouts", "agents",
-    });
-
-    // Pong (inline in ResponseResult.oneOf[0]): required = type, version, protocol
+    // Pong (inline in ResponseResult.oneOf[0])
     const response_result = defs.object.get("ResponseResult").?;
     const one_of = response_result.object.get("oneOf").?;
     const pong_schema = one_of.array.items[0];
     const pong_required = pong_schema.object.get("required").?;
-    const pong_fields = [_][]const u8{ "type", "version", "protocol" };
-    for (pong_required.array.items, 0..) |item, i| {
-        try testing.expectEqualStrings(pong_fields[i], item.string);
+    for (pong_required.array.items) |item| {
+        const name = item.string;
+        var found = false;
+        inline for (@typeInfo(Pong).@"struct".fields) |field| {
+            if (std.mem.eql(u8, field.name, name)) {
+                found = true;
+                break;
+            }
+        }
+        if (!found) return error.MissingStructField;
     }
 
-    // EventEnvelope: required = event, data
+    // EventEnvelope
     const event_envelope = event_schema;
     const event_required = event_envelope.object.get("required").?;
-    const event_fields = [_][]const u8{ "event", "data" };
-    for (event_required.array.items, 0..) |item, i| {
-        try testing.expectEqualStrings(event_fields[i], item.string);
+    for (event_required.array.items) |item| {
+        const name = item.string;
+        var found = false;
+        inline for (@typeInfo(EventEnvelope).@"struct".fields) |field| {
+            if (std.mem.eql(u8, field.name, name)) {
+                found = true;
+                break;
+            }
+        }
+        if (!found) return error.MissingStructField;
     }
 
     // AgentStatus enum: all values from schema
@@ -278,6 +286,15 @@ test "AgentStatus.unknown absorbs unrecognized values" {
     try testing.expectEqual(AgentStatus.unknown, parsed.value.status);
 }
 
+test "AgentStatus.unknown via parseFromValue" {
+    // Exercises jsonParseFromValue — the real path used by client.zig's
+    // Response = json.Parsed(json.Value).
+    const value = json.Value{ .string = "paused" };
+    const parsed = try json.parseFromValue(AgentStatus, testing.allocator, value, .{});
+    defer parsed.deinit();
+    try testing.expectEqual(AgentStatus.unknown, parsed.value);
+}
+
 test "AgentInfo optional fields default to null" {
     const json_str =
         \\{
@@ -304,12 +321,8 @@ test "AgentInfo optional fields default to null" {
 
 test "required-field checker fails when a required field is renamed" {
     // Escenario Gherkin: "zig build test falla si se renombra un campo
-    // requerido de AgentInfo" — la mitad negativa (la mitad positiva ya la
-    // ejercita "types match herdr-api.schema.json required fields and enum
-    // values" arriba, pasando la lista real). Esta prueba duplica localmente
-    // la misma lógica de comparación que RequiredCheck.check para confirmar
-    // que la rama `error.MissingRequiredField` es alcanzable de forma
-    // automática y repetible, sin depender de una edición manual del schema.
+    // requerido de AgentInfo" — la mitad negativa. Usa el RequiredCheck
+    // compartido a nivel de archivo, no una copia local.
     const gpa = std.heap.page_allocator;
     const schema_bytes = @embedFile("testdata/herdr-api.schema.json");
     const parsed = try json.parseFromSlice(json.Value, gpa, schema_bytes, .{});
@@ -320,35 +333,36 @@ test "required-field checker fails when a required field is renamed" {
     const success_response = schemas.object.get("success_response").?;
     const defs = success_response.object.get("$defs").?;
 
-    const RequiredCheck = struct {
-        fn check(defs_obj: json.Value, type_name: []const u8, comptime fields: []const []const u8) !void {
-            const def = defs_obj.object.get(type_name).?;
-            const required = def.object.get("required").?;
-            var schema_fields: [fields.len][]const u8 = undefined;
-            for (required.array.items, 0..) |item, i| {
-                schema_fields[i] = item.string;
-            }
-            inline for (fields) |expected| {
-                var found = false;
-                for (schema_fields) |actual| {
-                    if (std.mem.eql(u8, actual, expected)) {
-                        found = true;
-                        break;
-                    }
-                }
-                if (!found) return error.MissingRequiredField;
-            }
+    // Build a modified defs where AgentInfo.required has "pane_id" renamed
+    // to "pane_id_renamed" — the checker must fail because AgentInfo has no
+    // such field.
+    const agent_def = defs.object.get("AgentInfo").?;
+    const original_required = agent_def.object.get("required").?;
+    var modified_items: std.array_list.Managed(json.Value) = .init(testing.allocator);
+    defer modified_items.deinit();
+    for (original_required.array.items) |item| {
+        const name = item.string;
+        if (std.mem.eql(u8, name, "pane_id")) {
+            try modified_items.append(.{ .string = "pane_id_renamed" });
+        } else {
+            try modified_items.append(item);
         }
-    };
+    }
 
-    // "pane_id" renombrado a "pane_id_renamed" — no existe en el schema real.
-    const result = RequiredCheck.check(defs, "AgentInfo", &.{
-        "terminal_id", "agent_status", "workspace_id", "tab_id", "pane_id_renamed", "focused", "revision",
-    });
-    try testing.expectError(error.MissingRequiredField, result);
+    // Create new maps (don't copy existing hashmap headers — that would
+    // alias backing storage and cause subtle bugs when the original defs
+    // is reused below).
+    var modified_agent_map: json.ObjectMap = .empty;
+    defer modified_agent_map.deinit(testing.allocator);
+    try modified_agent_map.put(testing.allocator, "required", .{ .array = modified_items });
 
-    // La lista real (sin renombrar) sigue pasando sin error.
-    try RequiredCheck.check(defs, "AgentInfo", &.{
-        "terminal_id", "agent_status", "workspace_id", "tab_id", "pane_id", "focused", "revision",
-    });
+    var modified_defs_map: json.ObjectMap = .empty;
+    defer modified_defs_map.deinit(testing.allocator);
+    try modified_defs_map.put(testing.allocator, "AgentInfo", .{ .object = modified_agent_map });
+
+    const result = RequiredCheck.check(AgentInfo, .{ .object = modified_defs_map }, "AgentInfo");
+    try testing.expectError(error.MissingStructField, result);
+
+    // The real (unmodified) defs still passes.
+    try RequiredCheck.check(AgentInfo, defs, "AgentInfo");
 }
