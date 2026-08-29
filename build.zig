@@ -78,4 +78,15 @@ pub fn build(b: *std.Build) void {
     }
     const vt_spike_tests = b.addTest(.{ .root_module = vt_spike_mod });
     test_step.dependOn(&b.addRunArtifact(vt_spike_tests).step);
+
+    // theme_css (#14): no lo importa nadie todavía (su consumidor es #26), así que
+    // sin esto zig build test nunca compila ni corre sus tests. Mismo patrón que
+    // vt_spike_mod — módulo propio, sin dependencias más allá de std.
+    const theme_css_mod = b.createModule(.{
+        .root_source_file = b.path("src/ui/theme_css.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const theme_css_tests = b.addTest(.{ .root_module = theme_css_mod });
+    test_step.dependOn(&b.addRunArtifact(theme_css_tests).step);
 }
