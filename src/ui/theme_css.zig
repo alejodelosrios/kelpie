@@ -11,10 +11,11 @@ pub const CssVar = struct {
 
 /// Iterator over CSS variable declarations in a string.
 /// Parses `--name: value;` patterns, skipping comments and non-variable rules.
-/// One declaration per line: a line that doesn't start with `--` (after
-/// whitespace) is skipped up to its next `\n`, so `--a: b; --c: d;` on a single
-/// line only yields `--a`. Matches the one-declaration-per-line shape Omarchy's
-/// template engine actually emits.
+/// A line whose first non-space content isn't `--` is discarded up to its
+/// `\n`, so `:root { --a: b; }` on one line yields nothing; multiple
+/// declarations on one line do parse fine (`--a: b; --c: d;` yields both).
+/// Matches the one-declaration-per-line shape Omarchy's template engine
+/// actually emits.
 pub const Iterator = struct {
     css: []const u8,
     pos: usize,
