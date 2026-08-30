@@ -33,10 +33,15 @@ pub const Sleeper = struct {
     }
 };
 
-/// Production `Sleeper`: backs `.sleep()` with the real `Io.sleep`. Caller
-/// owns the storage (must outlive the `EventsClient` it's wired into).
+/// Production `Sleeper`: backs `.sleep()` with the real `Io.sleep`, sliced
+/// into 10ms steps checking `stopping` (same pattern as `client.zig:141-149`'s
+/// `Watchdog.run`) so a `stop()` call during a long backoff wait returns
+/// almost immediately instead of blocking for the full delay. Caller owns
+/// the storage (must outlive the `EventsClient` it's wired into) and must
+/// point `stopping` at that same `EventsClient`'s `.stopping` field.
 pub const IoSleeper = struct {
     io: Io,
+    stopping: *const std.atomic.Value(bool),
 
     pub fn sleeper(self: *IoSleeper) Sleeper {
         return .{ .ptr = self, .sleepFn = sleepImpl };
@@ -44,7 +49,12 @@ pub const IoSleeper = struct {
 
     fn sleepImpl(ptr: *anyopaque, ms: u32) void {
         const self: *IoSleeper = @ptrCast(@alignCast(ptr));
-        Io.sleep(self.io, .fromMilliseconds(ms), .awake) catch {};
+        const slice_ms: u32 = 10;
+        var elapsed: u32 = 0;
+        while (elapsed < ms) : (elapsed += slice_ms) {
+            if (self.stopping.load(.acquire)) return;
+            Io.sleep(self.io, .fromMilliseconds(@min(slice_ms, ms - elapsed)), .awake) catch return;
+        }
     }
 };
 
@@ -74,7 +84,8 @@ const backoff_max_ms: u32 = 30_000;
 pub const EventsClient = struct {
     gpa: std.mem.Allocator,
     io: Io,
-    /// gpa-owned copy — the reader thread outlives whoever calls `start()`.
+    /// Caller-owned: must outlive the reader thread, which starts with
+    /// `start()` and only stops once `stop()` returns.
     socket_path: []const u8,
     dispatcher: Dispatcher,
     sleeper: Sleeper,
@@ -106,6 +117,7 @@ pub const EventsClient = struct {
             tmp.shutdown(self.io, .recv) catch {};
         }
         if (self.thread) |t| t.join();
+        self.thread = null;
     }
 
     fn run(self: *EventsClient) void {
@@ -126,6 +138,10 @@ pub const EventsClient = struct {
         defer conn.close();
         self.active_fd.store(conn.stream.socket.handle, .release);
         defer self.active_fd.store(-1, .release);
+        // `stop()` may have run in the open()..store() window above, missed
+        // seeing a valid fd, and skipped the shutdown that would otherwise
+        // unblock the read loop below — catch that here before it can hang.
+        if (self.stopping.load(.acquire)) return;
 
         try sendSubscribe(&conn);
         const ack_line = try takeLine(&conn.reader.interface);
@@ -139,7 +155,10 @@ pub const EventsClient = struct {
 
         while (true) {
             const line = try takeLine(&conn.reader.interface);
-            try self.deliverEvent(line);
+            // A single malformed/unrecognized event must not tear down an
+            // otherwise-healthy connection — only transport errors from
+            // `takeLine` above should trigger a reconnect.
+            self.deliverEvent(line) catch {};
         }
     }
 
@@ -157,31 +176,46 @@ pub const EventsClient = struct {
         const snapshot_value = result.object.get("snapshot") orelse return;
 
         const parsed_snapshot = json.parseFromValue(types.SessionSnapshot, self.gpa, snapshot_value, .{ .ignore_unknown_fields = true }) catch return;
-        defer parsed_snapshot.deinit();
+        errdefer parsed_snapshot.deinit();
 
-        var ctx = ResyncCtx{ .client = self, .snapshot = parsed_snapshot.value };
-        self.dispatcher.invoke(resyncTrampoline, &ctx);
+        // Heap-allocated, not a stack local: `Dispatcher.invoke` isn't
+        // guaranteed synchronous (production wraps `glib.MainContext.invoke`,
+        // which can queue and return before the task runs) — the trampoline
+        // frees both the parsed snapshot and this ctx once it's actually
+        // done with them.
+        const ctx = self.gpa.create(ResyncCtx) catch {
+            parsed_snapshot.deinit();
+            return;
+        };
+        ctx.* = .{ .client = self, .parsed = parsed_snapshot };
+        self.dispatcher.invoke(resyncTrampoline, ctx);
     }
 
     fn deliverEvent(self: *EventsClient, line: []const u8) !void {
         const parsed = try json.parseFromSlice(types.EventEnvelope, self.gpa, line, .{ .ignore_unknown_fields = true });
-        defer parsed.deinit();
+        errdefer parsed.deinit();
 
-        var ctx = EventCtx{ .client = self, .envelope = parsed.value };
-        self.dispatcher.invoke(eventTrampoline, &ctx);
+        // Same heap-ownership-transfer reasoning as `resync()` above.
+        const ctx = try self.gpa.create(EventCtx);
+        ctx.* = .{ .client = self, .parsed = parsed };
+        self.dispatcher.invoke(eventTrampoline, ctx);
     }
 };
 
-const EventCtx = struct { client: *EventsClient, envelope: types.EventEnvelope };
+const EventCtx = struct { client: *EventsClient, parsed: json.Parsed(types.EventEnvelope) };
 fn eventTrampoline(ctx: *anyopaque) void {
     const c: *EventCtx = @ptrCast(@alignCast(ctx));
-    c.client.on_event(c.client.callback_ctx, c.envelope);
+    c.client.on_event(c.client.callback_ctx, c.parsed.value);
+    c.parsed.deinit();
+    c.client.gpa.destroy(c);
 }
 
-const ResyncCtx = struct { client: *EventsClient, snapshot: types.SessionSnapshot };
+const ResyncCtx = struct { client: *EventsClient, parsed: json.Parsed(types.SessionSnapshot) };
 fn resyncTrampoline(ctx: *anyopaque) void {
     const c: *ResyncCtx = @ptrCast(@alignCast(ctx));
-    c.client.on_resynced(c.client.callback_ctx, c.snapshot);
+    c.client.on_resynced(c.client.callback_ctx, c.parsed.value);
+    c.parsed.deinit();
+    c.client.gpa.destroy(c);
 }
 
 fn sendSubscribe(conn: *client.Connection) !void {
@@ -329,6 +363,36 @@ const ThreadIdDispatcher = struct {
         }
         _ = args.self.invoke_count.fetchAdd(1, .monotonic);
         args.task(args.task_ctx);
+    }
+};
+
+/// `Dispatcher` test double that queues tasks instead of running them inline
+/// — mimics a real `glib.MainContext.invoke` call from a non-owning thread,
+/// which enqueues and returns immediately rather than running synchronously.
+/// Exists to catch the UAF a synchronous-only dispatcher test double
+/// (`ThreadIdDispatcher` above) can't: if `EventsClient` freed its ctx/parsed
+/// JSON before the task actually ran, `drain()` would read freed memory.
+const QueueingDispatcher = struct {
+    const QueuedTask = struct { task: *const fn (ctx: *anyopaque) void, ctx: *anyopaque };
+
+    queue: [64]QueuedTask = undefined,
+    len: std.atomic.Value(usize) = .init(0),
+
+    fn dispatcher(self: *@This()) Dispatcher {
+        return .{ .ptr = self, .invokeFn = invokeImpl };
+    }
+
+    fn invokeImpl(ptr: *anyopaque, task: *const fn (ctx: *anyopaque) void, task_ctx: *anyopaque) void {
+        const self: *@This() = @ptrCast(@alignCast(ptr));
+        const i = self.len.fetchAdd(1, .acq_rel);
+        if (i < self.queue.len) self.queue[i] = .{ .task = task, .ctx = task_ctx };
+    }
+
+    /// Runs every queued task, in order. Call only after the producing
+    /// `EventsClient` has stopped reading more than `queue.len` events.
+    fn drain(self: *@This()) void {
+        const n = @min(self.len.load(.acquire), self.queue.len);
+        for (self.queue[0..n]) |qt| qt.task(qt.ctx);
     }
 };
 
@@ -530,4 +594,115 @@ test "stop() unblocks a connection that never responds, and the thread joins cle
     // Give the reader thread a moment to actually be blocked in the read.
     Io.sleep(testing.io, .fromMilliseconds(50), .awake) catch {};
     events_client.stop(); // must return — regression guard against a hang.
+}
+
+test "queueing dispatcher: ctx and parsed JSON survive until the task actually runs, later, without leaking" {
+    var path_buf: [64]u8 = undefined;
+    var server: net.Server = undefined;
+    const path = try startFakeServer(&server, testing.io, &path_buf);
+    defer Io.Dir.deleteFileAbsolute(testing.io, path) catch {};
+
+    const scripts = [_]CycleScript{
+        .{ .events = &.{
+            "{\"event\":\"pane_created\",\"data\":{}}",
+            "{\"event\":\"pane_updated\",\"data\":{}}",
+        } },
+    };
+    const server_thread = try std.Thread.spawn(.{}, fakeEventsServerThread, .{ &server, testing.io, &scripts });
+    defer server_thread.join();
+    defer server.deinit(testing.io);
+
+    var callbacks = RecordingCallbacks{};
+    var queueing_dispatcher = QueueingDispatcher{};
+    var no_sleep = RecordingSleeper{};
+
+    const socket_path = try testing.allocator.dupe(u8, path);
+    defer testing.allocator.free(socket_path);
+
+    var events_client = EventsClient{
+        .gpa = testing.allocator,
+        .io = testing.io,
+        .socket_path = socket_path,
+        .dispatcher = queueing_dispatcher.dispatcher(),
+        .sleeper = no_sleep.sleeper(),
+        .on_event = RecordingCallbacks.onEvent,
+        .on_resynced = RecordingCallbacks.onResynced,
+        .callback_ctx = &callbacks,
+    };
+    try events_client.start();
+
+    const Check = struct {
+        fn done(qd: *QueueingDispatcher) bool {
+            return qd.len.load(.acquire) >= 3; // 1 resync + 2 events queued
+        }
+    };
+    waitUntil(testing.io, QueueingDispatcher, &queueing_dispatcher, Check.done, 2000);
+    events_client.stop();
+
+    // Nothing has executed yet — the reader thread (and every frame that
+    // built a ctx/`Parsed` for `invoke`) is long gone, but the heap-owned
+    // ctx/JSON the queue is holding onto must still be valid to read here.
+    try testing.expectEqual(@as(usize, 0), callbacks.count());
+
+    queueing_dispatcher.drain();
+
+    try testing.expect(callbacks.count() >= 2);
+    try testing.expect(callbacks.resync_count.load(.acquire) >= 1);
+    // `testing.allocator` fails the test on any leak — each drained task
+    // must free its own ctx/`Parsed`, no more and no less.
+}
+
+test "stop() during a backoff sleep returns fast, not after the full delay" {
+    var path_buf: [64]u8 = undefined;
+    var server: net.Server = undefined;
+    const path = try startFakeServer(&server, testing.io, &path_buf);
+    defer Io.Dir.deleteFileAbsolute(testing.io, path) catch {};
+
+    // Server accepts and immediately closes without acking — every cycle is
+    // a failure, so the reader thread always ends up sleeping `backoff_ms`
+    // (1000ms on the very first failure) via the real `IoSleeper`. Bounded
+    // (not `while (true)`) so this thread reliably returns on its own —
+    // relying on `server.deinit()` to unblock a pending `accept()` isn't
+    // guaranteed on every backend.
+    const RejectServer = struct {
+        fn run(srv: *net.Server, io: Io) void {
+            const stream = srv.accept(io) catch return;
+            stream.close(io);
+        }
+    };
+    const server_thread = try std.Thread.spawn(.{}, RejectServer.run, .{ &server, testing.io });
+    defer server_thread.join();
+    defer server.deinit(testing.io);
+
+    var callbacks = RecordingCallbacks{};
+    var thread_id_dispatcher = ThreadIdDispatcher{};
+
+    const socket_path = try testing.allocator.dupe(u8, path);
+    defer testing.allocator.free(socket_path);
+
+    var events_client = EventsClient{
+        .gpa = testing.allocator,
+        .io = testing.io,
+        .socket_path = socket_path,
+        .dispatcher = thread_id_dispatcher.dispatcher(),
+        .sleeper = undefined, // set below, once `io_sleeper` points at this same client's `.stopping`.
+        .on_event = RecordingCallbacks.onEvent,
+        .on_resynced = RecordingCallbacks.onResynced,
+        .callback_ctx = &callbacks,
+    };
+    var io_sleeper = IoSleeper{ .io = testing.io, .stopping = &events_client.stopping };
+    events_client.sleeper = io_sleeper.sleeper();
+    try events_client.start();
+
+    // Let the first failed cycle happen and land inside its 1000ms backoff
+    // sleep before asking it to stop.
+    Io.sleep(testing.io, .fromMilliseconds(100), .awake) catch {};
+
+    const start = std.Io.Timestamp.now(testing.io, .awake);
+    events_client.stop();
+    const elapsed = start.durationTo(std.Io.Timestamp.now(testing.io, .awake));
+
+    // Regression guard for the un-sliced `Io.sleep(backoff_ms)`: without
+    // slicing, this would block for most of the remaining ~900ms.
+    try testing.expect(elapsed.nanoseconds < 300 * std.time.ns_per_ms);
 }
