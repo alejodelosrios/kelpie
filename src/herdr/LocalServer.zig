@@ -862,5 +862,11 @@ test "readHerdrStatus: hung server → null within the timeout, not a hang (skip
     const elapsed = start.durationTo(Io.Timestamp.now(testing.io, .awake));
 
     try testing.expect(compat == null);
-    try testing.expect(elapsed.nanoseconds < 5 * std.time.ns_per_s);
+    // 3.5s, not 5s: the fake hangs 4s, readHerdrStatus's own timeout is 3s.
+    // A 5s threshold falls outside both and passes whether or not the fix is
+    // there (verified in FASE 7 by running both versions) — this margin sits
+    // strictly between 3004ms (with the fix) and 4007ms (without it), so the
+    // assertion actually fails red if the .timeout on readHerdrStatus's
+    // std.process.run call is ever removed.
+    try testing.expect(elapsed.nanoseconds < 3_500 * std.time.ns_per_ms);
 }
