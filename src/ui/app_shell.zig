@@ -372,3 +372,45 @@ test "parseCommand: unknown subcommand" {
     const cmd = parseCommand(&.{"dance"});
     try std.testing.expect(cmd == .unknown);
 }
+
+test "parseCommand: focus missing argument message names the expected form" {
+    const cmd = parseCommand(&.{"focus"});
+    try std.testing.expectEqualStrings("focus: missing <device>/<pane> argument\n", std.mem.span(cmd.malformed));
+}
+
+test "parseCommand: focus without slash message names the expected form" {
+    const cmd = parseCommand(&.{ "focus", "noslash" });
+    try std.testing.expectEqualStrings("focus: argument must be <device>/<pane>\n", std.mem.span(cmd.malformed));
+}
+
+test "parseCommand: focus with empty pane after slash message mentions pane" {
+    // "device/" — slash present, pane part is empty. Distinct malformed message
+    // from the missing-slash case; a builder could accidentally reuse the wrong
+    // static string here, so pin the exact text.
+    const cmd = parseCommand(&.{ "focus", "device/" });
+    try std.testing.expectEqualStrings("focus: pane part is empty\n", std.mem.span(cmd.malformed));
+}
+
+// --- focusAgent (seam, criterio 1/3 del diseño #17) ---
+
+test "focusAgent: seam always reports not-found today (no agent model until #16/#19)" {
+    // This is the actual behavior of scenario "focus con kelpie ya abierta y
+    // agente inexistente": focusAgent(device, pane) -> false for any input,
+    // because there is no agent model yet. Pin it directly so a future change
+    // that accidentally starts returning true for some input doesn't slip by
+    // silently before #16/#19 wire a real Store.
+    try std.testing.expect(!focusAgent("local", "p1"));
+    try std.testing.expect(!focusAgent("local", "no-existe"));
+    try std.testing.expect(!focusAgent("", ""));
+}
+
+// Scenario "focus con un pane conocido inyectado por el seam de test" (criterio 1)
+// cannot be exercised as a pure unit test without either (a) mocking D-Bus/GIO,
+// which the design explicitly forbids, or (b) temporarily patching focusAgent's
+// body to return true and driving a real second `kelpie focus local/<pane>`
+// invocation against a running primary instance. There is no test-only
+// injection point in production code today (focusAgent takes no override and
+// the design doesn't ask for one — see #17 "Riesgos", condición 3). QA cannot
+// add that seam without touching production logic, which is Apply's job, not
+// QA's. This scenario is therefore reported below as a manual gate, not
+// skipped.
