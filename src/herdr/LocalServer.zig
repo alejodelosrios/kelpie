@@ -148,6 +148,14 @@ pub fn readHerdrStatus(io: Io, gpa: std.mem.Allocator, environ: Environ.Map) ?Se
     const result = std.process.run(gpa, io, .{
         .argv = &argv,
         .environ_map = &environ,
+        // Without this, RunOptions.timeout defaults to .none
+        // (process.zig:485) and a server that accepts the connection but
+        // never responds hangs `ensureRunning` forever — exactly the
+        // protocol-incompatible case this reader exists to detect. `run`'s
+        // own `defer child.kill(io)` (process.zig:508) reaps the process on
+        // timeout; `error.Timeout` is in `RunError` (process.zig:456, via
+        // `Io.Timeout.Error`) and falls into the `catch return null` below.
+        .timeout = .{ .duration = .{ .raw = .fromSeconds(3), .clock = .awake } },
     }) catch return null;
     defer gpa.free(result.stdout);
     defer gpa.free(result.stderr);
@@ -186,6 +194,10 @@ fn tryConnect(io: Io, socket_path: []const u8) !void {
 
 /// Decide whether the local `herdr server` is alive, launch it if needed,
 /// and return the outcome.
+///
+/// Blocks for up to ~1s (ambiguous retry) + ~10s (launch window) + whatever
+/// `status_reader` takes (the real `readHerdrStatus` caps at 3s) — call from
+/// a worker thread, never the GTK UI thread.
 ///
 /// `ever_connected` is session-level state owned by the caller (true once
 /// this process has ever successfully connected to the server).
@@ -302,6 +314,15 @@ const testing = std.testing;
 fn fakeServerAcceptOne(server: *net.Server, io: Io) void {
     const stream = server.accept(io) catch return;
     stream.close(io);
+}
+
+/// Accepts one connection and then hangs for `hang_ms` without writing
+/// anything — reproduces a herdr server that is reachable but never
+/// responds, the case `readHerdrStatus`'s timeout guards against.
+fn fakeServerAcceptAndHang(server: *net.Server, io: Io, hang_ms: i64) void {
+    const stream = server.accept(io) catch return;
+    defer stream.close(io);
+    Io.sleep(io, .fromMilliseconds(hang_ms), .awake) catch {};
 }
 
 var test_server_next_id: std.atomic.Value(u32) = .init(0);
@@ -797,4 +818,49 @@ test "ensureRunning: .launched with null StatusReader leaves compat null" {
     try testing.expectEqual(Kind.launched, status.kind);
     try testing.expect(status.compatible == null);
     try testing.expect(status.restart_needed == null);
+}
+
+// ---------------------------------------------------------------------------
+// Auditor finding: readHerdrStatus must not hang forever against a server
+// that accepts but never responds — exactly the protocol-incompatible case
+// compatible/restart_needed exist to detect. Regression guard for the
+// RunOptions.timeout that fixed it.
+// ---------------------------------------------------------------------------
+
+test "readHerdrStatus: hung server → null within the timeout, not a hang (skips without a real herdr binary)" {
+    // readHerdrStatus always shells out to the literal `herdr status --json`
+    // — there is no injectable seam at this level (see the design's
+    // "Riesgos"). Skip cleanly if the binary isn't on PATH, same pattern
+    // `client.zig` uses for tests that need a real herdr session.
+    const version_check = std.process.run(testing.allocator, testing.io, .{
+        .argv = &.{ "herdr", "--version" },
+    }) catch |err| {
+        if (err == error.FileNotFound) return error.SkipZigTest;
+        return err;
+    };
+    testing.allocator.free(version_check.stdout);
+    testing.allocator.free(version_check.stderr);
+
+    var path_buf: [108]u8 = undefined;
+    const path = try testSocketPath(&path_buf);
+    const addr = try net.UnixAddress.init(path);
+    var server = try addr.listen(testing.io, .{});
+    defer std.Io.Dir.deleteFileAbsolute(testing.io, path) catch {};
+
+    // Hangs longer than readHerdrStatus's own 3s timeout, so the test proves
+    // readHerdrStatus actually gives up instead of waiting out the hang.
+    const thread = try std.Thread.spawn(.{}, fakeServerAcceptAndHang, .{ &server, testing.io, @as(i64, 4000) });
+    defer thread.join();
+    defer server.deinit(testing.io);
+
+    var env = Environ.Map.init(testing.allocator);
+    defer env.deinit();
+    try env.put("HERDR_SOCKET_PATH", path);
+
+    const start = Io.Timestamp.now(testing.io, .awake);
+    const compat = readHerdrStatus(testing.io, testing.allocator, env);
+    const elapsed = start.durationTo(Io.Timestamp.now(testing.io, .awake));
+
+    try testing.expect(compat == null);
+    try testing.expect(elapsed.nanoseconds < 5 * std.time.ns_per_s);
 }

@@ -58,6 +58,11 @@ que el mirror pinneado no aplica aquí. Todas verificadas con `sed -n '<línea>p
 | `std.process.run(gpa, io, options: RunOptions) RunError!RunResult` — captura stdout/stderr de `herdr status --json`, esperando a que termine | `/usr/lib/zig/std/process.zig:496` | ✅ |
 | `RunOptions{ argv, environ_map, ... }` / `RunResult{ term, stdout, stderr }` (caller-owned, hay que `gpa.free`) | `/usr/lib/zig/std/process.zig:458-492` | ✅ |
 | `json.parseFromSlice(T, gpa, slice, .{ .ignore_unknown_fields = true })` sobre un struct propio `{ server: struct { compatible: bool, restart_needed: bool } }` — mismo patrón que usa `types.zig` para el resto del API de herdr | `src/herdr/client.zig:200` (uso ya existente en este repo) | ✅ |
+| `RunOptions.timeout: Io.Timeout = .none` (default sin timeout — la causa del bloqueante de FASE 7) | `/usr/lib/zig/std/process.zig:485` | ✅ |
+| `Io.Timeout = union(enum){none, duration: Clock.Duration, deadline}`, `.Error = error{Timeout}` (parte de `RunError` vía `process.zig:456`) | `/usr/lib/zig/std/Io.zig:1132-1138` | ✅ |
+| `Clock.Duration = struct{raw: Io.Duration, clock: Clock}` | `/usr/lib/zig/std/Io.zig:890-892` | ✅ |
+| `Io.Duration.fromSeconds(x: i64) Duration` | `/usr/lib/zig/std/Io.zig:986` | ✅ |
+| `run`'s `defer child.kill(io)` reapea al hijo colgado cuando `error.Timeout` dispara | `/usr/lib/zig/std/process.zig:508-510` | ✅ |
 
 ## Diseño de la API
 
@@ -211,16 +216,24 @@ Los escenarios automatizables (todos salvo el de PATH de login) se implementan c
   `/usr/lib/zig/std/posix.zig:1669-1675`). Por eso el paso 3 de la lógica atrapa "cualquier error
   que no sea `FileNotFound`" en vez de matchear `error.ConnectionRefused` explícitamente: un diseño
   que hiciera lo segundo nunca dispararía el reintento de 1s contra un socket muerto real.
-- **`errnoBug` en vez de un error catcheable, para `NOTSOCK`/`BADF`/etc.** (`Threaded.zig:11977-11983`):
-  si `socket_path` apuntara a un archivo que existe pero no es un socket AF_UNIX, `connect()` haría
-  `panic` en modo debug (`errnoBug`, `Threaded.zig:14054-14056`). No debería ocurrir en el flujo
-  normal (herdr siempre crea un socket real en esa ruta cuando la crea), así que se deja como hueco
-  declarado, no como caso manejado: si algún día un fallo distinto deja un archivo regular en esa
-  ruta, `ensureRunning` puede *panic*-ear en vez de devolver un error. No es el `unreachable`/`catch
-  unreachable` que ADR-0001/#21 prohíben en código propio (es interno a la stdlib), pero el efecto —
-  matar la sesión — es el mismo. Documentado como riesgo, no resuelto: resolverlo requeriría un
-  `statFile` previo solo para este caso de borde hipotético, que es código extra para algo que nunca
-  se ha observado.
+- ~~`errnoBug` en vez de un error catcheable, para `NOTSOCK`/`BADF`/etc.~~ **Descartado por el
+  auditor de FASE 7, verificado empíricamente, no solo razonado**: `NOTSOCK` es sobre el *fd* del
+  socket que hace la llamada, no sobre a qué apunta `socket_path` en el filesystem — si
+  `socket_path` fuera un archivo regular, Linux devuelve `ECONNREFUSED` al intentar conectar, no
+  `ENOTSOCK`. Reproducido por el auditor creando un archivo regular en esa ruta: `connect()` dio
+  `errno 111` → `error.Unexpected`, la misma rama del hallazgo de arriba — nunca `errnoBug`. El
+  hueco declarado en la versión anterior de este diseño era una suposición sin ejecutar; queda
+  cerrado.
+- **`readHerdrStatus` puede colgar `ensureRunning` indefinidamente** — bloqueante encontrado por el
+  auditor de FASE 7 y corregido en el mismo PR: `std.process.run` sin `.timeout` (el default es
+  `.none`, `process.zig:485`) espera para siempre si `herdr status --json` conecta pero nunca
+  responde — exactamente el servidor con protocolo incompatible que `compatible`/`restart_needed`
+  existen para detectar. Fix: `.timeout = .{ .duration = .{ .raw = .fromSeconds(3), .clock = .awake
+  } }` en la llamada (`Io.Timeout`/`Clock.Duration`, `Io.zig:1132`/`:890`); `error.Timeout` ya cae en
+  el `catch return null` existente, y el `defer child.kill(io)` interno de `run` (`process.zig:508`)
+  mata al hijo colgado. Reproducido y verificado por el auditor contra un socket real que acepta y
+  nunca escribe, y cubierto con un test de regresión (`readHerdrStatus: hung server → null within
+  the timeout, not a hang`, gateado a que el binario `herdr` esté en PATH).
 - **El proceso lanzado puede quedar zombie** si `herdr server` termina mientras kelpie sigue vivo:
   el issue pide explícitamente "no poseído (no se mata al salir)", que se traduce a nunca guardar el
   `Child` ni llamar `wait()`/`kill()` sobre él — la contrapartida inevitable de eso en POSIX es que,
