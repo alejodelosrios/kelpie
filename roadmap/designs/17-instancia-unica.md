@@ -69,8 +69,10 @@ onCommandLine(app, cmdline, _) callconv(.c) c_int:
         .reload_font    -> cmdline.printerrLiteral("reload-font: no implementado (area:font)\n"); setExitStatus(0)
         .malformed(msg) | .unknown(msg):
             cmdline.printerrLiteral(msg); setExitStatus(1)
-    return 0   // ver "Riesgos": el valor de retorno del propio signal no está documentado en el
-               // binding extraído; el exit status real lo fija setExitStatus, no este return.
+    return status  // el valor de retorno del handler SÍ importa: gio2.zig:2026-2029 documenta
+                    // que GIO llama setExitStatus(cmdline, <retorno del handler>) DESPUÉS de que
+                    // el handler retorna, pisando cualquier setExitStatus fijado adentro. `status`
+                    // se acumula en el switch y debe coincidir con el último setExitStatus llamado.
 ```
 
 `parseCommand([]const []const u8) Command` vive en `app_shell.zig` como función pura sobre
@@ -148,13 +150,17 @@ Escenario: parser de argumentos (test unitario, criterio 5)
 
 ## Riesgos y preguntas abiertas
 
-- El binding extraído no documenta qué hace GIO con el valor `c_int` que retorna el handler del
-  signal `command-line` (solo dice "invoked... when a command-line is not handled locally", sin
-  precisar el retorno). Este diseño **no depende de ese retorno**: el exit status real se fija
-  siempre con `ApplicationCommandLine.setExitStatus`, que sí está documentado y citado. El
-  handler retorna `0` de forma fija. Si en QA se observa que el retorno del signal sí importa
-  (p. ej. cambia si GIO llama a `done()` automáticamente), se ajusta ahí — es un hueco declarado,
-  no una suposición.
+- **Corrección tras la 2ª auditoría (este hueco no existía)**: la versión original de este diseño
+  afirmaba que "el binding extraído no documenta qué hace GIO con el valor `c_int` que retorna el
+  handler" y que por tanto era seguro retornar `0` fijo. Era falso: `gio2.zig:2026-2029`, cuatro
+  líneas por encima de la firma de `setExitStatus` que sí se citó, dice literalmente *"The return
+  value of the `command-line` signal is passed to [`setExitStatus`] when the handler returns"* —
+  GIO pisa cualquier `setExitStatus` fijado dentro del handler con lo que éste retorne al final.
+  Con `return 0;` fijo, ningún `setExitStatus(cmdline, 1)` interno sobrevivía. El auditor lo probó
+  con un experimento controlado (`return 0` → `return 7`, el exit code observado de la invocación
+  remota cambió de `0` a `7`). Lección de método: un "hueco declarado" es una afirmación sobre la
+  fuente, y se verifica con el mismo `sed -n` que cualquier cita — no con "no lo dice" sin haber
+  mirado cuatro líneas más arriba de la firma que sí se citó.
 - Condición (1) de wA:p2: el criterio 4 es dueño de este issue y se verifica literalmente con
   `env -u DBUS_SESSION_BUS_ADDRESS -- ./zig-out/bin/kelpie --version` y
   `env -u DBUS_SESSION_BUS_ADDRESS -- ./zig-out/bin/kelpie setup --dry-run`, ambos exit 0, en
