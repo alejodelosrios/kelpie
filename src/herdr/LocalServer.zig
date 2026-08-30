@@ -617,6 +617,50 @@ test "ensureRunning: dead socket + ever_connected + .force → launches" {
 }
 
 // ---------------------------------------------------------------------------
+// Scenario (QA addition — not in the design's Gherkin list, but the launch
+// window's ~10s/200-attempt timeout path had zero coverage): launcher that
+// never brings up a listener → ensureRunning spends the full ~10s window
+// before giving up with .launch_timed_out, not a shortcut.
+// ---------------------------------------------------------------------------
+
+fn noListenerLauncher(io: Io, environ: Environ.Map, socket_path: []const u8) !void {
+    _ = io;
+    _ = environ;
+    _ = socket_path; // deliberately never create the socket
+}
+
+test "ensureRunning: launcher never listens → ~10s launch window → .launch_timed_out" {
+    var path_buf: [108]u8 = undefined;
+    const path = try testSocketPath(&path_buf);
+
+    var env = Environ.Map.init(testing.allocator);
+    defer env.deinit();
+
+    const start = Io.Timestamp.now(testing.io, .awake);
+    const status = try ensureRunning(
+        testing.io,
+        testing.allocator,
+        env,
+        path,
+        .auto,
+        false,
+        noListenerLauncher,
+        statusReaderNull,
+    );
+    const elapsed = start.durationTo(Io.Timestamp.now(testing.io, .awake));
+
+    // The launch window is 200 × 50 ms = 10 s. Assert real time was spent
+    // (not just the final Kind), same slack pattern as the ~1s dead-socket
+    // test: >= 9s, < 20s.
+    try testing.expect(elapsed.nanoseconds >= 9 * std.time.ns_per_s);
+    try testing.expect(elapsed.nanoseconds < 20 * std.time.ns_per_s);
+
+    try testing.expectEqual(Kind.launch_timed_out, status.kind);
+    try testing.expect(status.compatible == null);
+    try testing.expect(status.restart_needed == null);
+}
+
+// ---------------------------------------------------------------------------
 // Scenario: server already alive → .connected (no launcher called)
 // ---------------------------------------------------------------------------
 
