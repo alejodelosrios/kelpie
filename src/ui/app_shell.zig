@@ -85,14 +85,58 @@ fn onActivate(app: *adw.Application, _: ?*anyopaque) callconv(.c) void {
 
 fn loadCss() void {
     const display = gdk.Display.getDefault() orelse return;
-    const provider = gtk.CssProvider.new();
-    defer gobject.Object.unref(gobject.ext.as(gobject.Object, provider));
-    gtk.CssProvider.loadFromString(provider, kelpie_css);
+
+    // 1. Structural CSS (heights, typography) — always from the embedded constant.
+    const struct_provider = gtk.CssProvider.new();
+    defer gobject.Object.unref(gobject.ext.as(gobject.Object, struct_provider));
+    gtk.CssProvider.loadFromString(struct_provider, kelpie_css);
     gtk.StyleContext.addProviderForDisplay(
         display,
-        gobject.ext.as(gtk.StyleProvider, provider),
+        gobject.ext.as(gtk.StyleProvider, struct_provider),
         gtk.STYLE_PROVIDER_PRIORITY_APPLICATION,
     );
+
+    // 2. Theme CSS (colors) — from Omarchy's generated file or embedded fallback.
+    const theme_provider = gtk.CssProvider.new();
+    defer gobject.Object.unref(gobject.ext.as(gobject.Object, theme_provider));
+
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    if (findThemeCssPath(&path_buf)) |path| {
+        gtk.CssProvider.loadFromPath(theme_provider, path);
+    } else {
+        const fallback_css: [*:0]const u8 = @embedFile("kelpie-fallback-css");
+        gtk.CssProvider.loadFromString(theme_provider, fallback_css);
+        std.log.warn("theme CSS not found, using fallback", .{});
+    }
+
+    gtk.StyleContext.addProviderForDisplay(
+        display,
+        gobject.ext.as(gtk.StyleProvider, theme_provider),
+        gtk.STYLE_PROVIDER_PRIORITY_APPLICATION,
+    );
+}
+
+/// Returns the path to `~/.local/state/omarchy/current/theme/kelpie.css`
+/// (or `$XDG_STATE_HOME/omarchy/current/theme/kelpie.css` if set),
+/// or null if the file doesn't exist. The returned pointer lives inside `buf`,
+/// which must outlive it (`loadCss` keeps its own `path_buf` on the stack for this).
+fn findThemeCssPath(buf: *[std.fs.max_path_bytes]u8) ?[*:0]const u8 {
+    const state_home = std.c.getenv("XDG_STATE_HOME");
+    const path = if (state_home) |sh|
+        std.fmt.bufPrintZ(buf, "{s}/omarchy/current/theme/kelpie.css", .{std.mem.span(sh)}) catch return null
+    else blk: {
+        const home = std.c.getenv("HOME") orelse return null;
+        break :blk std.fmt.bufPrintZ(buf, "{s}/.local/state/omarchy/current/theme/kelpie.css", .{std.mem.span(home)}) catch return null;
+    };
+
+    // Check if the file exists
+    const file = gio.File.newForPath(path);
+    defer gobject.Object.unref(gobject.ext.as(gobject.Object, file));
+    if (gio.File.queryExists(file, null) == 0) {
+        return null;
+    }
+
+    return path;
 }
 
 fn addSidebarToggleShortcut(widget: *gtk.Widget, split: *adw.OverlaySplitView) void {

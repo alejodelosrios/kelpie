@@ -120,3 +120,21 @@ Formato: `- [YYYY-MM-DD] #issue — qué se vio · por qué no se arregló ahora
   verificó para ningún otro contexto de llamada · dispara si `request()` se llama algún día desde un
   hilo con pila reducida (p.ej. un hilo worker con stack_size explícito bajo): mover `Connection` a
   heap o reducir sus buffers para esa ruta.
+- [2026-08-28] #14 — el doc-comment de `theme_css.zig:15-16` promete un parser de
+  `--nombre: valor;` sin calificar que es *por línea*: `iterate(":root { --a: b; --c: d; }")`
+  devuelve 0 variables en silencio porque, al no empezar la línea con `--`, salta hasta el próximo
+  `\n` · no se resolvió porque el diseño lo declara explícitamente como "parser mínimo de líneas" y
+  el `kelpie.css` real de Omarchy es una declaración por línea · dispara si #26 (el consumidor real)
+  alimenta al parser un CSS minificado o con varias declaraciones por línea: documentar la
+  limitación en el propio doc-comment antes de que #26 la descubra en producción.
+- [2026-08-28] #14 — `roadmap/designs/14-tokens-color.md` no listaba `build.zig` en "archivos que se
+  tocan" pese a que el Apply final sí lo edita (dos líneas: `addAnonymousImport` del fallback CSS y
+  el `addTest` de `theme_css.zig`) · no se resolvió con una vuelta más de diseño porque las dos
+  ediciones ya están verificadas como mínimas y correctas (mismo patrón que código existente) · el
+  diseño se enmienda en este mismo PR para que el contrato refleje lo mergeado.
+- [2026-08-28] #14 — `findThemeCssPath` (`app_shell.zig:121-140`) no reintenta
+  `~/.local/state/omarchy/...` si `$XDG_STATE_HOME` está definido pero no contiene `kelpie.css` ·
+  es el comportamiento correcto por spec XDG y por diseño, no un bug · anotado porque es la
+  diferencia de entorno más probable entre la máquina del humano y CI: una captura con fallback en
+  vez del tema activo puede parecer un bug de #14 cuando es solo un `$XDG_STATE_HOME` apuntando a
+  otro lado.
