@@ -156,11 +156,13 @@ fn onActivate(app: *adw.Application, _: ?*anyopaque) callconv(.c) void {
 /// GApplication command-line handler. Receives remote invocations (e.g.
 /// `kelpie focus local/pane1`) and dispatches them to the appropriate action.
 ///
-/// Return value: always 0. The real exit status is set via
-/// `ApplicationCommandLine.setExitStatus`. The GIO documentation for the
-/// `command-line` signal does not specify what GIO does with the handler's
-/// return value (see design #17 "Riesgos"), so we don't rely on it.
+/// Return value: the exit status (0 = success, 1 = error). GIO passes this
+/// value to `ApplicationCommandLine.setExitStatus` after the handler returns
+/// (gio2.zig:2025-2029, gio.Application.signals.command-line documentation),
+/// so the return value IS the real exit status — we must not hardcode 0.
 fn onCommandLine(app: *adw.Application, cmdline: *gio.ApplicationCommandLine, _: ?*anyopaque) callconv(.c) c_int {
+    var status: c_int = 0;
+
     var argc: c_int = 0;
     const argv_raw = gio.ApplicationCommandLine.getArguments(cmdline, &argc);
     defer glib.strfreev(@ptrCast(argv_raw));
@@ -170,8 +172,8 @@ fn onCommandLine(app: *adw.Application, cmdline: *gio.ApplicationCommandLine, _:
     if (count < 2) {
         // No subcommand: just activate the primary instance.
         gio.Application.activate(gobject.ext.as(gio.Application, app));
-        gio.ApplicationCommandLine.setExitStatus(cmdline, 0);
-        return 0;
+        gio.ApplicationCommandLine.setExitStatus(cmdline, status);
+        return status;
     }
 
     // Build a slice of []const u8 from argv[1..argc] for parseCommand.
@@ -185,7 +187,6 @@ fn onCommandLine(app: *adw.Application, cmdline: *gio.ApplicationCommandLine, _:
     switch (cmd) {
         .activate => {
             gio.Application.activate(gobject.ext.as(gio.Application, app));
-            gio.ApplicationCommandLine.setExitStatus(cmdline, 0);
         },
         .focus => |f| {
             if (focusAgent(f.device, f.pane)) {
@@ -194,34 +195,32 @@ fn onCommandLine(app: *adw.Application, cmdline: *gio.ApplicationCommandLine, _:
                 // this path is unreachable until #16/#19 land — but it's correct).
                 const gtk_app = gobject.ext.as(gtk.Application, app);
                 if (gtk.Application.getActiveWindow(gtk_app)) |w| gtk.Window.present(w);
-                gio.ApplicationCommandLine.setExitStatus(cmdline, 0);
             } else {
                 // ponytail: no agent model until #16 (sidebar) and #19 (attach).
                 // This is the truth of today, not a false stub.
                 cmdline.printerrLiteral("focus: agente no encontrado\n");
-                gio.ApplicationCommandLine.setExitStatus(cmdline, 1);
+                status = 1;
             }
         },
         .reload_theme => {
             reloadTheme();
-            gio.ApplicationCommandLine.setExitStatus(cmdline, 0);
         },
         .reload_font => {
             // ponytail: area:font has not been started yet. The command arrives,
             // dispatches, and responds with an explicit warning — nothing more.
             cmdline.printerrLiteral("reload-font: no implementado (area:font)\n");
-            gio.ApplicationCommandLine.setExitStatus(cmdline, 0);
         },
         .malformed => |msg| {
             cmdline.printerrLiteral(msg);
-            gio.ApplicationCommandLine.setExitStatus(cmdline, 1);
+            status = 1;
         },
         .unknown => |msg| {
             cmdline.printerrLiteral(msg);
-            gio.ApplicationCommandLine.setExitStatus(cmdline, 1);
+            status = 1;
         },
     }
-    return 0;
+    gio.ApplicationCommandLine.setExitStatus(cmdline, status);
+    return status;
 }
 
 /// Seam for selecting an agent in the sidebar. Always returns false today —
