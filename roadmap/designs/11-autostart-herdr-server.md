@@ -17,11 +17,14 @@ estuvo vivo en este proceso.
 
 **No entra** (del issue + recorte YAGNI):
 - Arrancar servidores remotos, gestionar `herdr update` (explícito en el issue).
-- Parsear `herdr status --json` para los mensajes de UI: la sonda por `connect()` ya da una señal
-  más precisa que ese CLI (que puede leer estado stale), y los tres/cuatro casos que necesita la UI
-  ya salen directos del `Status` que devuelve `ensureRunning`. Añadir un segundo camino de lectura
-  de estado (shell-out a `herdr status --json`) para decorar el mismo mensaje es una fuente de
-  verdad duplicada que el issue no pide en sus criterios de aceptación.
+- **Corrección de scope (orquestador del fleet, wA:p1, en FASE 4):** el recorte original descartaba
+  `herdr status --json` entero. Se mantiene el recorte para `running`/`stopped` — ahí `connect()` es
+  la autoridad y es el punto central del issue, un segundo camino de lectura sería fuente de verdad
+  duplicada. Pero **`compatible`/`restart_needed` no salen de `connect()`**: un servidor con
+  protocolo incompatible acepta la conexión TCP/Unix igual (el rechazo de protocolo es a nivel
+  NDJSON-RPC, no a nivel socket) — ninguna otra ruta da ese dato, y el criterio de aceptación de #19
+  depende de él. `ensureRunning` sí lee esos dos campos de `herdr status --json` cuando el servidor
+  resulta alcanzable (`.connected`/`.launched`), vía `std.process.run` (ver tabla de citas).
 - Wiring del botón "Reconectar" en la UI y la llamada real a `ensureRunning` desde `app_shell.zig`
   — eso es `src/ui/`, terreno de #17, y `main.zig` está arrendado. Este issue expone el `Mode.force`
   que ese wiring necesitará; conectar el botón es su PR, no el mío.
@@ -52,17 +55,33 @@ que el mirror pinneado no aplica aquí. Todas verificadas con `sed -n '<línea>p
 | `Environ.Map.get(self: Map, key) ?[]const u8` (recibido por valor, mismo patrón que `client.resolveSocketPath`) | `/usr/lib/zig/std/process/Environ.zig:285`, convención en `src/herdr/client.zig:64-68` | ✅ |
 | `Io.Timestamp.now(io, clock) Timestamp` (para el sufijo único del log) | `/usr/lib/zig/std/Io.zig:909` | ✅ |
 | `FakeServer` sobre socket Unix real en un hilo, para tests deterministas sin depender del binario `herdr` | patrón ya existente, `src/herdr/client.zig:601-616` (`startFakeServer`) | ✅ (reutilizado como referencia de estilo, no importado) |
+| `std.process.run(gpa, io, options: RunOptions) RunError!RunResult` — captura stdout/stderr de `herdr status --json`, esperando a que termine | `/usr/lib/zig/std/process.zig:496` | ✅ |
+| `RunOptions{ argv, environ_map, ... }` / `RunResult{ term, stdout, stderr }` (caller-owned, hay que `gpa.free`) | `/usr/lib/zig/std/process.zig:458-492` | ✅ |
+| `json.parseFromSlice(T, gpa, slice, .{ .ignore_unknown_fields = true })` sobre un struct propio `{ server: struct { compatible: bool, restart_needed: bool } }` — mismo patrón que usa `types.zig` para el resto del API de herdr | `src/herdr/client.zig:200` (uso ya existente en este repo) | ✅ |
 
 ## Diseño de la API
 
 ```zig
 pub const Mode = enum { auto, force }; // force = "Reconectar" de la UI, ignora la guardia
 
-pub const Status = enum {
+pub const Kind = enum {
     connected,             // ya estaba vivo (connect() aceptó a la primera)
     launched,               // lo lanzamos y aceptó dentro de los 10s
     launch_timed_out,       // lo lanzamos pero no aceptó a tiempo
     stopped_no_autostart,    // confirmado muerto, ever_connected==true, mode==.auto: no se relanza
+};
+
+/// `compatible`/`restart_needed` solo se rellenan cuando `kind` implica un
+/// servidor alcanzable (`.connected`/`.launched`) — para `.launch_timed_out`
+/// y `.stopped_no_autostart` no hay a quién preguntarle, quedan `null`. Si
+/// `herdr status --json` falla o no parsea con el servidor ya alcanzable
+/// (proceso no encontrado, JSON inesperado), también quedan `null`: un dato
+/// de compatibilidad que no se pudo leer no es un motivo para que
+/// `ensureRunning` falle — el servidor sigue corriendo igual.
+pub const Status = struct {
+    kind: Kind,
+    compatible: ?bool = null,
+    restart_needed: ?bool = null,
 };
 
 /// Inyectado para hacer testeable el lanzamiento sin el binario `herdr` real:
@@ -78,13 +97,29 @@ pub const Launcher = *const fn (io: Io, environ: Environ.Map, socket_path: []con
 /// llama `wait`/`kill`).
 pub fn spawnHerdrServer(io: Io, environ: Environ.Map, socket_path: []const u8) !void;
 
+pub const ServerCompat = struct { compatible: bool, restart_needed: bool };
+
+/// Inyectado por la misma razón que `Launcher`: el binario `herdr` real no
+/// está garantizado en CI/sandbox. `null` de retorno (no error) significa
+/// "no se pudo leer" y es indistinguible, para `ensureRunning`, de un
+/// `herdr status --json` que falló — en ambos casos `Status.compatible`/
+/// `.restart_needed` quedan `null`.
+pub const StatusReader = *const fn (io: Io, gpa: std.mem.Allocator, environ: Environ.Map) ?ServerCompat;
+
+/// Lector real: `std.process.run(gpa, io, .{.argv = &.{"herdr","status","--json"}, ...})`,
+/// parsea `{"server":{"compatible":bool,"restart_needed":bool}}` del stdout. Cualquier fallo
+/// (spawn, término no-cero, JSON que no parsea) se traga y devuelve `null` — nunca propaga error.
+pub fn readHerdrStatus(io: Io, gpa: std.mem.Allocator, environ: Environ.Map) ?ServerCompat;
+
 pub fn ensureRunning(
     io: Io,
+    gpa: std.mem.Allocator,
     environ: Environ.Map,
     socket_path: []const u8,
     mode: Mode,
     ever_connected: bool,
     launch: Launcher,
+    status_reader: StatusReader,
 ) !Status;
 ```
 
@@ -103,6 +138,9 @@ Lógica de `ensureRunning` (los tres casos + guardia del issue, en orden):
    dentro de la ventana → `.launched`; si no → `.launch_timed_out`. Un `Child` con salida no-cero no
    se trata como fallo (no se inspecciona: no se guarda el `Child`) — lo único que importa es si el
    socket llegó a aceptar.
+6. Si el `Kind` resultante es `.connected` o `.launched`: `status_reader(io, gpa, environ)`. `null`
+   → los dos campos quedan `null`; `ServerCompat` → se copian a `Status.compatible`/`.restart_needed`.
+   Nunca cambia el `Kind` ya decidido por `connect()` — este paso es puramente informativo.
 
 `ever_connected` es responsabilidad del llamador (vive en `app_shell.zig`/#17: es estado de sesión de
 proceso, `ensureRunning` es sin estado entre llamadas — ninguna de las dos cosas es terreno de este
@@ -115,8 +153,26 @@ Escenario: Sin herdr.sock, kelpie arranca el servidor y conecta
   Dado que socket_path no existe en el filesystem
   Cuando ensureRunning corre con mode=.auto y ever_connected=false, y el launcher inyectado
     levanta un FakeServer real en socket_path dentro de la ventana de 10s
-  Entonces ensureRunning devuelve .launched
+  Entonces ensureRunning devuelve Status{.kind = .launched, ...}
   Y el launcher fue invocado exactamente una vez
+
+Escenario: compatible/restart_needed se leen vía el StatusReader inyectado cuando el servidor responde
+  Dado un servidor alcanzable (Kind .connected o .launched) y un StatusReader de test que devuelve
+    ServerCompat{.compatible = false, .restart_needed = true}
+  Cuando ensureRunning termina de resolver el Kind
+  Entonces Status.compatible == false y Status.restart_needed == true
+
+Escenario: un StatusReader que devuelve null no cambia el Kind ya resuelto
+  Dado un servidor alcanzable y un StatusReader de test que siempre devuelve null
+  Cuando ensureRunning corre
+  Entonces Status.kind es el mismo que sin el StatusReader (.connected/.launched según el caso)
+  Y Status.compatible == null y Status.restart_needed == null
+
+Escenario: el StatusReader nunca se invoca si el servidor no es alcanzable
+  Dado mode=.auto, ever_connected=true y el socket muerto (confirmado tras el reintento de 1s)
+  Cuando ensureRunning corre
+  Entonces devuelve Status{.kind = .stopped_no_autostart, .compatible = null, .restart_needed = null}
+  Y el StatusReader de test (que registra si fue llamado) nunca fue invocado
 
 Escenario: Socket muerto (bind-then-kill), kelpie espera ~1s y arranca
   Dado un archivo de socket en socket_path creado con un listener que se cerró sin aceptar
@@ -140,8 +196,9 @@ Escenario: PATH de login en los panes del servidor arrancado por kelpie
   shell de login (`$SHELL -lc 'echo $PATH'`). Ver "Riesgos".)
 ```
 
-Los cuatro escenarios automatizables se implementan como tests Zig con `FakeServer`/sockets reales
-en `/tmp`, mismo patrón que `client.zig` — no contra el `herdr` real, así que corren en CI sin él.
+Los escenarios automatizables (todos salvo el de PATH de login) se implementan como tests Zig con
+`FakeServer`/sockets reales en `/tmp` y `Launcher`/`StatusReader` de test, mismo patrón que
+`client.zig` — no contra el `herdr` real, así que corren en CI sin él.
 
 ## Riesgos y preguntas abiertas
 
@@ -174,6 +231,14 @@ en `/tmp`, mismo patrón que `client.zig` — no contra el `herdr` real, así qu
 - **El criterio de PATH de login no es verificable por un test Zig**: requiere el binario `herdr`
   real y un pane real de Herdr corriendo. Queda como paso manual de QA (FASE 6 del flow), no como
   test automatizado — declarado aquí para que QA no lo redescubra como "falta cobertura".
+- **`readHerdrStatus` (el `StatusReader` real) no tiene test automatizado contra el `herdr` real**,
+  igual que el `Launcher` real (`spawnHerdrServer`) — mismo motivo: CI/sandbox no garantiza el
+  binario. La cobertura automatizada es sobre la lógica de `ensureRunning` con un `StatusReader` de
+  test; que `herdr status --json` real produzca exactamente `{"server":{"compatible":...,
+  "restart_needed":...}}` lo verifica QA a mano en la misma sesión donde valida PATH de login (ya
+  hay una sesión real con `herdr` vivo para ese criterio, es el mismo paso). Si el schema real de
+  `herdr status --json` no coincidiera, `readHerdrStatus` lo trata como "no parsea" → `null` — no
+  hay riesgo de panic ni de bloquear `ensureRunning`, solo de perder el dato de compatibilidad.
 - **Filename único del log**: se usa `Io.Timestamp.now(io, .awake).nanoseconds` como sufijo. No hay
   garantía teórica de unicidad entre dos arranques en el mismo nanosegundo (imposible en la práctica
   para este flujo, que ocurre como mucho una vez por arranque de kelpie), así que no se le añade PID
