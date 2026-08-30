@@ -66,9 +66,12 @@ const kelpie_css =
 // onActivate(). Single instance, single thread — no synchronization needed.
 var empty_state_text: [*:0]const u8 = "No agents";
 
-// Set by onActivate on first activation; subsequent activate signals just present
-// the existing window instead of creating a duplicate. Single thread — no sync.
-var main_window: ?*gtk.Window = null;
+// CssProviders: created and registered with the display once (first loadCss
+// call); subsequent calls reuse the same providers and just reload the data.
+// loadFromPath/loadFromString clear previous content, so the cascade updates
+// in place without accumulating providers. Single thread — no sync.
+var struct_provider: ?*gtk.CssProvider = null;
+var theme_provider: ?*gtk.CssProvider = null;
 
 /// Picks the empty-state label text by locale prefix (see design #13 §"No entra" —
 /// no translation framework, just a `LANG`/`LC_ALL` prefix check).
@@ -86,7 +89,17 @@ pub fn run(init: std.process.Init) u8 {
     _ = gio.Application.signals.activate.connect(app, ?*anyopaque, &onActivate, null, .{});
     _ = gio.Application.signals.command_line.connect(app, ?*anyopaque, &onCommandLine, null, .{});
 
-    const status = gio.Application.run(gobject.ext.as(gio.Application, app), 0, null);
+    // Build real argv from init so GIO sends remaining args to the primary
+    // instance (G_APPLICATION_HANDLES_COMMAND_LINE requires real argv — passing
+    // argc=0/argv=null makes the feature inert).
+    const args = init.minimal.args.toSlice(init.arena.allocator()) catch return 1;
+    var argv_buf: [16][*:0]u8 = undefined;
+    const argc: c_int = @intCast(@min(args.len, argv_buf.len));
+    for (0..@intCast(argc)) |i| {
+        argv_buf[i] = @constCast(args[i].ptr);
+    }
+
+    const status = gio.Application.run(gobject.ext.as(gio.Application, app), argc, &argv_buf);
     return if (status < 0 or status > 255) 1 else @intCast(status);
 }
 
@@ -95,12 +108,14 @@ fn onActivate(app: *adw.Application, _: ?*anyopaque) callconv(.c) void {
 
     // Idempotent: if the window already exists (e.g. command-line triggered
     // activate() after a focus command), just present it — don't create a duplicate.
-    if (main_window) |w| {
+    // Uses GTK's own accounting (getActiveWindow) instead of a global that could
+    // become a dangling pointer if the window is destroyed between signals.
+    const gtk_app = gobject.ext.as(gtk.Application, app);
+    if (gtk.Application.getActiveWindow(gtk_app)) |w| {
         gtk.Window.present(w);
         return;
     }
 
-    const gtk_app = gobject.ext.as(gtk.Application, app);
     const window = adw.ApplicationWindow.new(gtk_app);
     gtk.Window.setDefaultSize(gobject.ext.as(gtk.Window, window), 1100, 700);
     gtk.Window.setTitle(gobject.ext.as(gtk.Window, window), "kelpie");
@@ -135,8 +150,7 @@ fn onActivate(app: *adw.Application, _: ?*anyopaque) callconv(.c) void {
 
     addSidebarToggleShortcut(gobject.ext.as(gtk.Widget, window), split);
 
-    main_window = gobject.ext.as(gtk.Window, window);
-    gtk.Window.present(main_window.?);
+    gtk.Window.present(gobject.ext.as(gtk.Window, window));
 }
 
 /// GApplication command-line handler. Receives remote invocations (e.g.
@@ -178,7 +192,8 @@ fn onCommandLine(app: *adw.Application, cmdline: *gio.ApplicationCommandLine, _:
                 gio.Application.activate(gobject.ext.as(gio.Application, app));
                 // Present the window (the seam always returns false today, so
                 // this path is unreachable until #16/#19 land — but it's correct).
-                if (main_window) |w| gtk.Window.present(w);
+                const gtk_app = gobject.ext.as(gtk.Application, app);
+                if (gtk.Application.getActiveWindow(gtk_app)) |w| gtk.Window.present(w);
                 gio.ApplicationCommandLine.setExitStatus(cmdline, 0);
             } else {
                 // ponytail: no agent model until #16 (sidebar) and #19 (attach).
@@ -228,33 +243,34 @@ fn loadCss() void {
     const display = gdk.Display.getDefault() orelse return;
 
     // 1. Structural CSS (heights, typography) — always from the embedded constant.
-    const struct_provider = gtk.CssProvider.new();
-    defer gobject.Object.unref(gobject.ext.as(gobject.Object, struct_provider));
-    gtk.CssProvider.loadFromString(struct_provider, kelpie_css);
-    gtk.StyleContext.addProviderForDisplay(
-        display,
-        gobject.ext.as(gtk.StyleProvider, struct_provider),
-        gtk.STYLE_PROVIDER_PRIORITY_APPLICATION,
-    );
+    if (struct_provider == null) {
+        struct_provider = gtk.CssProvider.new();
+        gtk.StyleContext.addProviderForDisplay(
+            display,
+            gobject.ext.as(gtk.StyleProvider, struct_provider.?),
+            gtk.STYLE_PROVIDER_PRIORITY_APPLICATION,
+        );
+    }
+    gtk.CssProvider.loadFromString(struct_provider.?, kelpie_css);
 
     // 2. Theme CSS (colors) — from Omarchy's generated file or embedded fallback.
-    const theme_provider = gtk.CssProvider.new();
-    defer gobject.Object.unref(gobject.ext.as(gobject.Object, theme_provider));
+    if (theme_provider == null) {
+        theme_provider = gtk.CssProvider.new();
+        gtk.StyleContext.addProviderForDisplay(
+            display,
+            gobject.ext.as(gtk.StyleProvider, theme_provider.?),
+            gtk.STYLE_PROVIDER_PRIORITY_APPLICATION,
+        );
+    }
 
     var path_buf: [std.fs.max_path_bytes]u8 = undefined;
     if (findThemeCssPath(&path_buf)) |path| {
-        gtk.CssProvider.loadFromPath(theme_provider, path);
+        gtk.CssProvider.loadFromPath(theme_provider.?, path);
     } else {
         const fallback_css: [*:0]const u8 = @embedFile("kelpie-fallback-css");
-        gtk.CssProvider.loadFromString(theme_provider, fallback_css);
+        gtk.CssProvider.loadFromString(theme_provider.?, fallback_css);
         std.log.warn("theme CSS not found, using fallback", .{});
     }
-
-    gtk.StyleContext.addProviderForDisplay(
-        display,
-        gobject.ext.as(gtk.StyleProvider, theme_provider),
-        gtk.STYLE_PROVIDER_PRIORITY_APPLICATION,
-    );
 }
 
 /// Returns the path to `~/.local/state/omarchy/current/theme/kelpie.css`
