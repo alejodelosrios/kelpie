@@ -162,3 +162,13 @@ Formato: `- [YYYY-MM-DD] #issue — qué se vio · por qué no se arregló ahora
   fallback funciona y la paleta es una elección estética que el issue no fija · dispara la próxima
   vez que alguien verifique tematización a ojo: darle al fallback una paleta que no coincida con
   ningún tema instalado de Omarchy, para que "cargó el fallback" sea visible sin leer el log.
+- [2026-08-30] #10 — dos criterios de aceptación de `Events.zig` (latencia < 200 ms de un
+  `pane_updated` con herdr vivo, y reconexión real observada tras `herdr server stop`) quedan
+  verificados **solo mecánicamente** (`zig build test`: 80/80, incluye el backoff con reloj
+  inyectable, el aislamiento de hilo y un dispatcher que encola de verdad para reproducir el UAF que
+  encontró la auditoría) pero **no en ventana real** · no se armó un harness desechable porque
+  `Events.zig` todavía no tiene consumidor (ni `main.zig` ni `app.zig` lo importan, y `main.zig`
+  estaba arrendado a #17 durante la ola) y ese harness reescribiría casi idéntico lo que el issue de
+  wiring va a construir de verdad con el `Dispatcher` real sobre `glib.MainContext` · dispara: el
+  issue que conecte `Events.zig` a `app.zig` **debe correr esos dos escenarios contra herdr real
+  antes de darse por cerrado**, no asumir que #10 ya los cubrió.
