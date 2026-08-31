@@ -11,6 +11,9 @@ const gtk = @import("gtk");
 const gdk = @import("gdk");
 const adw = @import("adw");
 const ThemeWatcher = @import("../omarchy/ThemeWatcher.zig");
+const Store = @import("../model/Store.zig").Store;
+const types = @import("../herdr/types.zig");
+const Sidebar = @import("sidebar.zig").Sidebar;
 
 const app_id = "io.github.alejodelosrios.kelpie";
 
@@ -61,11 +64,45 @@ const kelpie_css =
     "" ++
     ".kelpie-headerbar { min-height: 42px; }\n" ++
     ".kelpie-statusbar { min-height: 24px; }\n" ++
-    ".kelpie-empty-label { font-size: 28px; font-weight: 300; }\n";
+    ".kelpie-empty-label { font-size: 28px; font-weight: 300; }\n" ++
+    // Sidebar rows (#16 design §"Widgets, métricas y CSS") — cero hex/rgb/hsl,
+    // todo por var(--…) (ADR-0001 §5). Heights are the only metric in Zig.
+    ".kelpie-row-device { min-height: 30px; }\n" ++
+    ".kelpie-row-workspace { min-height: 30px; }\n" ++
+    ".kelpie-row-agent { min-height: 28px; }\n" ++
+    ".kelpie-sidebar-list row { background: transparent; }\n" ++
+    ".kelpie-sidebar-list row:hover { background: var(--item-wash); }\n" ++
+    ".kelpie-sidebar-list row:selected { background: var(--item-wash-selected); }\n" ++
+    ".kelpie-sidebar-list row separator { min-height: 1px; background: var(--hairline); }\n" ++
+    ".kelpie-row-title { color: var(--text-1); font-size: 13px; font-weight: 500; }\n" ++
+    ".kelpie-row-subtitle { color: var(--text-2); font-size: 11.5px; }\n" ++
+    ".kelpie-glyph-working { color: var(--status-working); }\n" ++
+    ".kelpie-glyph-blocked { color: var(--status-blocked); }\n" ++
+    ".kelpie-glyph-done { color: var(--status-done); }\n";
 
 // Set once in run(), before gio.Application.run() hands control to GTK; read by
 // onActivate(). Single instance, single thread — no synchronization needed.
 var empty_state_text: [*:0]const u8 = "No agents";
+
+// Set once, before onActivate runs — same "set in run(), read in onActivate"
+// pattern as empty_state_text. Defaults to page_allocator (not `undefined`)
+// so unit tests that call `focusAgent` without ever calling `run()` — e.g.
+// against an empty Store — get a real, usable allocator instead of garbage.
+var gpa: std.mem.Allocator = std.heap.page_allocator;
+
+// The Store (#12) and Sidebar (#16) this app owns. `store` needs no GTK/display
+// and is built lazily the first time anything needs it (including from a
+// `focus` command-line arriving before any `activate`); `sidebar`'s widget
+// tree needs a live display, so it's only ever built from `onActivate`.
+var store: Store = undefined;
+var store_inited = false;
+var sidebar: Sidebar = undefined;
+var sidebar_inited = false;
+
+/// `--demo-sidebar[=N]` (design #16 §"--demo-sidebar[=N]"): set by `main.zig`
+/// before `run()`, read once by the first `onActivate`. `null` = no demo data.
+pub var demo_sidebar_n: ?u32 = null;
+var demo_sidebar_seeded = false;
 
 // CssProviders: created and registered with the display once (first loadCss
 // call); subsequent calls reuse the same providers and just reload the data.
@@ -87,6 +124,7 @@ fn emptyStateText(lang: []const u8) [*:0]const u8 {
 }
 
 pub fn run(init: std.process.Init) u8 {
+    gpa = init.gpa;
     const lang = init.environ_map.get("LANG") orelse init.environ_map.get("LC_ALL") orelse "";
     empty_state_text = emptyStateText(lang);
 
@@ -136,7 +174,7 @@ fn onActivate(app: *adw.Application, _: ?*anyopaque) callconv(.c) void {
     gtk.Widget.setSizeRequest(gobject.ext.as(gtk.Widget, status_bar), -1, 24);
     gtk.Widget.addCssClass(gobject.ext.as(gtk.Widget, status_bar), "kelpie-statusbar");
 
-    const sidebar = gtk.Box.new(.vertical, 0);
+    ensureSidebarInited();
 
     const empty_label = gtk.Label.new(empty_state_text);
     gtk.Widget.addCssClass(gobject.ext.as(gtk.Widget, empty_label), "kelpie-empty-label");
@@ -144,7 +182,7 @@ fn onActivate(app: *adw.Application, _: ?*anyopaque) callconv(.c) void {
     gtk.Widget.setValign(gobject.ext.as(gtk.Widget, empty_label), .center);
 
     const split = adw.OverlaySplitView.new();
-    adw.OverlaySplitView.setSidebar(split, gobject.ext.as(gtk.Widget, sidebar));
+    adw.OverlaySplitView.setSidebar(split, sidebar.widget);
     adw.OverlaySplitView.setContent(split, gobject.ext.as(gtk.Widget, empty_label));
     adw.OverlaySplitView.setMinSidebarWidth(split, 260);
     adw.OverlaySplitView.setMaxSidebarWidth(split, 260);
@@ -200,13 +238,15 @@ fn onCommandLine(app: *adw.Application, cmdline: *gio.ApplicationCommandLine, _:
         .focus => |f| {
             if (focusAgent(f.device, f.pane)) {
                 gio.Application.activate(gobject.ext.as(gio.Application, app));
-                // Present the window (the seam always returns false today, so
-                // this path is unreachable until #16/#19 land — but it's correct).
+                // Present the window and select the row (focusAgent already did
+                // the selection if the sidebar existed; activate() above builds
+                // it if this was the first invocation, but doesn't re-select).
                 const gtk_app = gobject.ext.as(gtk.Application, app);
-                if (gtk.Application.getActiveWindow(gtk_app)) |w| gtk.Window.present(w);
+                if (gtk.Application.getActiveWindow(gtk_app)) |w| {
+                    gtk.Window.present(w);
+                    if (sidebar_inited) _ = sidebar.selectByKey(f.device, f.pane);
+                }
             } else {
-                // ponytail: no agent model until #16 (sidebar) and #19 (attach).
-                // This is the truth of today, not a false stub.
                 cmdline.printerrLiteral("focus: agente no encontrado\n");
                 status = 1;
             }
@@ -232,19 +272,166 @@ fn onCommandLine(app: *adw.Application, cmdline: *gio.ApplicationCommandLine, _:
     return status;
 }
 
-/// Seam for selecting an agent in the sidebar. Always returns false today —
-/// there is no agent model until #16 (sidebar) and #19 (attach) land.
-/// Replace with a real Store query when #16 delivers the sidebar.
+/// Backed by the real Store (#16): true if `(device, pane)` exists as an
+/// agent. `ensureStoreInited` guarantees the Store exists even if this is
+/// the process's first invocation (a `focus` command-line call can arrive
+/// before any `activate`/window — no GTK/display needed for this). When the
+/// sidebar widget also happens to exist already, this additionally selects
+/// the row. The actual "switch herdr to this pane" action is #19 (attach) —
+/// out of scope here (design #16 §"No entra").
 fn focusAgent(device: []const u8, pane: []const u8) bool {
-    _ = device;
-    _ = pane;
-    return false;
+    ensureStoreInited();
+    const found = store.agents.contains(.{ .device_id = device, .pane_id = pane });
+    if (found and sidebar_inited) _ = sidebar.selectByKey(device, pane);
+    return found;
+}
+
+/// Builds the Store once (idempotent, same pattern as
+/// `startThemeWatcherOnce`) — no GTK/display dependency, safe to call from a
+/// headless command-line invocation or a unit test.
+fn ensureStoreInited() void {
+    if (store_inited) return;
+    store_inited = true;
+    store = Store.init(gpa);
+}
+
+/// Builds the Sidebar widget once `ensureStoreInited` has run, registers it
+/// as a `ChangeObserver`, and seeds `--demo-sidebar[=N]` synthetic data the
+/// first time it runs. Needs a live display — only called from `onActivate`.
+fn ensureSidebarInited() void {
+    ensureStoreInited();
+    if (sidebar_inited) return;
+    sidebar_inited = true;
+
+    sidebar.init(gpa, &store);
+    sidebar.setFocusCallback(&onSidebarActivated, null);
+    store.addObserver(sidebar.observer()) catch |err| {
+        std.log.err("sidebar: addObserver failed: {t}", .{err});
+    };
+
+    seedDemoSidebarOnce();
+}
+
+/// Row activation from a click (`gtk.ListView`'s single-click-activate,
+/// criterio 6). The real "switch herdr to this pane" action is #19 (attach,
+/// design #16 §"No entra") — logging is the honest truth of today, not a
+/// false stub.
+fn onSidebarActivated(_: ?*anyopaque, device: []const u8, pane: []const u8) void {
+    std.log.info("sidebar: focus {s}/{s} (attach pending #19)", .{ device, pane });
 }
 
 /// Re-applies the theme CSS. Callable from both `onActivate` (startup) and
 /// the `reload-theme` command-line subcommand.
 fn reloadTheme() void {
     loadCss();
+}
+
+// ---------------------------------------------------------------------------
+// --demo-sidebar[=N] (#16 design §"--demo-sidebar[=N]"): criterios 1, 2 y 5
+// exigen mirar y medir un sidebar poblado, y sin el cableado a herdr (#81,
+// fuera de alcance de #16) nada lo puebla en uso normal. This seeds a
+// synthetic snapshot of N agents (default 4) in 2 workspaces, all idle, and
+// arms a one-shot 2s timer that flips one to blocked via applyEvent — the
+// instrument the three criteria need, behind the flag, never touched by a
+// normal start.
+// ---------------------------------------------------------------------------
+
+const demo_blocked_pane = "pane-0";
+const demo_blocked_workspace = "ws-a";
+
+fn seedDemoSidebarOnce() void {
+    if (demo_sidebar_seeded) return;
+    const n = demo_sidebar_n orelse return;
+    demo_sidebar_seeded = true;
+
+    var arena_state = std.heap.ArenaAllocator.init(gpa);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const workspaces_buf = arena.alloc(types.WorkspaceInfo, 2) catch |err| {
+        std.log.err("--demo-sidebar: alloc failed: {t}", .{err});
+        return;
+    };
+    workspaces_buf[0] = .{
+        .workspace_id = "ws-a",
+        .number = 1,
+        .label = "Workspace A",
+        .focused = true,
+        .pane_count = 0,
+        .tab_count = 0,
+        .active_tab_id = "",
+        .agent_status = .idle,
+    };
+    workspaces_buf[1] = .{
+        .workspace_id = "ws-b",
+        .number = 2,
+        .label = "Workspace B",
+        .focused = false,
+        .pane_count = 0,
+        .tab_count = 0,
+        .active_tab_id = "",
+        .agent_status = .idle,
+    };
+
+    const agents = arena.alloc(types.AgentInfo, n) catch |err| {
+        std.log.err("--demo-sidebar: alloc failed: {t}", .{err});
+        return;
+    };
+    for (agents, 0..) |*a, i| {
+        const ws: []const u8 = if (i % 2 == 0) "ws-a" else "ws-b";
+        const pane_id = std.fmt.allocPrint(arena, "pane-{d}", .{i}) catch |err| {
+            std.log.err("--demo-sidebar: alloc failed: {t}", .{err});
+            return;
+        };
+        a.* = .{
+            .terminal_id = pane_id,
+            .agent_status = .idle,
+            .workspace_id = ws,
+            .tab_id = "tab-1",
+            .pane_id = pane_id,
+            .focused = false,
+            .revision = @intCast(i + 1),
+            .agent = "claude",
+            .cwd = "~/kelpie",
+        };
+    }
+
+    store.applySnapshot(.{
+        .version = "1",
+        .protocol = 1,
+        .workspaces = workspaces_buf,
+        .tabs = &.{},
+        .panes = &.{},
+        .layouts = &.{},
+        .agents = agents,
+    }) catch |err| {
+        std.log.err("--demo-sidebar: applySnapshot failed: {t}", .{err});
+        return;
+    };
+
+    if (n > 0) {
+        _ = glib.timeoutAddOnce(2000, &onDemoBlockTimer, null);
+    }
+}
+
+fn onDemoBlockTimer(_: ?*anyopaque) callconv(.c) void {
+    var obj: std.json.ObjectMap = .empty;
+    defer obj.deinit(gpa);
+    obj.put(gpa, "pane_id", .{ .string = demo_blocked_pane }) catch |err| {
+        std.log.err("--demo-sidebar: timer failed: {t}", .{err});
+        return;
+    };
+    obj.put(gpa, "workspace_id", .{ .string = demo_blocked_workspace }) catch |err| {
+        std.log.err("--demo-sidebar: timer failed: {t}", .{err});
+        return;
+    };
+    obj.put(gpa, "agent_status", .{ .string = "blocked" }) catch |err| {
+        std.log.err("--demo-sidebar: timer failed: {t}", .{err});
+        return;
+    };
+    store.applyEvent(.{ .event = .pane_agent_status_changed, .data = .{ .object = obj } }) catch |err| {
+        std.log.err("--demo-sidebar: applyEvent failed: {t}", .{err});
+    };
 }
 
 fn loadCss() void {
@@ -455,17 +642,41 @@ test "parseCommand: focus with empty pane after slash message mentions pane" {
     try std.testing.expectEqualStrings("focus: pane part is empty\n", std.mem.span(cmd.malformed));
 }
 
-// --- focusAgent (seam, criterio 1/3 del diseño #17) ---
+// --- focusAgent (criterio 1/3 del diseño #17, backed by the real Store since #16) ---
 
-test "focusAgent: seam always reports not-found today (no agent model until #16/#19)" {
-    // This is the actual behavior of scenario "focus con kelpie ya abierta y
-    // agente inexistente": focusAgent(device, pane) -> false for any input,
-    // because there is no agent model yet. Pin it directly so a future change
-    // that accidentally starts returning true for some input doesn't slip by
-    // silently before #16/#19 wire a real Store.
-    try std.testing.expect(!focusAgent("local", "p1"));
+test "focusAgent: a pane no test ever seeds reports not-found" {
+    // `store`/`sidebar_inited` are process-wide globals and zig's test
+    // runner reorders tests, so this only assumes "no other test ever seeds
+    // a pane named this" — not that the Store is empty.
     try std.testing.expect(!focusAgent("local", "no-existe"));
     try std.testing.expect(!focusAgent("", ""));
+}
+
+test "focusAgent: an agent actually present in the Store is found" {
+    // Proves the seam is real (Store-backed), not the old always-false stub:
+    // deleting the `store.agents.contains(...)` call in focusAgent (and
+    // reverting to `return false`) makes this fail while the not-found test
+    // above keeps passing.
+    ensureStoreInited();
+    try store.applySnapshot(.{
+        .version = "1",
+        .protocol = 1,
+        .workspaces = &.{},
+        .tabs = &.{},
+        .panes = &.{},
+        .layouts = &.{},
+        .agents = &.{.{
+            .terminal_id = "p1",
+            .agent_status = .idle,
+            .workspace_id = "ws-a",
+            .tab_id = "tab-1",
+            .pane_id = "p1",
+            .focused = false,
+            .revision = 1,
+        }},
+    });
+    try std.testing.expect(focusAgent("local", "p1"));
+    try std.testing.expect(!focusAgent("local", "p2"));
 }
 
 // Scenario "focus con un pane conocido inyectado por el seam de test" (criterio 1)
