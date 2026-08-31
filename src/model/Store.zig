@@ -303,19 +303,32 @@ pub const Store = struct {
                 );
                 defer parsed.deinit();
                 const data = parsed.value;
+                // First pass: check if the pane exists at all (no mutation).
                 var found = false;
+                {
+                    var check_it = self.agents.iterator();
+                    while (check_it.next()) |entry| {
+                        if (std.mem.eql(u8, entry.key_ptr.device_id, "local") and
+                            std.mem.eql(u8, entry.key_ptr.pane_id, data.pane_id))
+                        {
+                            found = true;
+                            break;
+                        }
+                    }
+                }
+                if (!found) return;
+                // Second pass: apply focus.
                 var it = self.agents.iterator();
                 while (it.next()) |entry| {
                     if (std.mem.eql(u8, entry.key_ptr.device_id, "local") and
                         std.mem.eql(u8, entry.key_ptr.pane_id, data.pane_id))
                     {
                         entry.value_ptr.focused = true;
-                        found = true;
                     } else if (std.mem.eql(u8, entry.key_ptr.device_id, "local")) {
                         entry.value_ptr.focused = false;
                     }
                 }
-                if (found) fireChanged(&self.observers);
+                fireChanged(&self.observers);
             },
 
             .workspace_created, .workspace_updated, .workspace_metadata_updated => {
@@ -332,9 +345,15 @@ pub const Store = struct {
                     .device_id = try self.gpa.dupe(u8, "local"),
                     .workspace_id = try self.gpa.dupe(u8, ws.workspace_id),
                 };
+                errdefer {
+                    self.gpa.free(key.device_id);
+                    self.gpa.free(key.workspace_id);
+                }
                 if (try self.workspaces.fetchPut(key, ws)) |old| {
-                    self.gpa.free(old.key.device_id);
-                    self.gpa.free(old.key.workspace_id);
+                    // fetchPut kept old.key in the map; free the duplicate
+                    // key we just built (it was discarded by the map).
+                    self.gpa.free(key.device_id);
+                    self.gpa.free(key.workspace_id);
                     freeWorkspaceInfoStrings(self.gpa, old.value);
                 }
                 fireChanged(&self.observers);
@@ -378,8 +397,9 @@ pub const Store = struct {
                 var it = self.workspaces.iterator();
                 while (it.next()) |entry| {
                     if (std.mem.eql(u8, entry.key_ptr.workspace_id, parsed.value.workspace_id)) {
+                        const duped_label = try self.gpa.dupe(u8, parsed.value.label);
                         self.gpa.free(entry.value_ptr.label);
-                        entry.value_ptr.label = try self.gpa.dupe(u8, parsed.value.label);
+                        entry.value_ptr.label = duped_label;
                         break;
                     }
                 }
@@ -418,9 +438,15 @@ pub const Store = struct {
                     .device_id = try self.gpa.dupe(u8, "local"),
                     .tab_id = try self.gpa.dupe(u8, tab.tab_id),
                 };
+                errdefer {
+                    self.gpa.free(key.device_id);
+                    self.gpa.free(key.tab_id);
+                }
                 if (try self.tabs.fetchPut(key, tab)) |old| {
-                    self.gpa.free(old.key.device_id);
-                    self.gpa.free(old.key.tab_id);
+                    // fetchPut kept old.key in the map; free the duplicate
+                    // key we just built (it was discarded by the map).
+                    self.gpa.free(key.device_id);
+                    self.gpa.free(key.tab_id);
                     freeTabInfoStrings(self.gpa, old.value);
                 }
                 fireChanged(&self.observers);
@@ -457,8 +483,9 @@ pub const Store = struct {
                 var it = self.tabs.iterator();
                 while (it.next()) |entry| {
                     if (std.mem.eql(u8, entry.key_ptr.tab_id, parsed.value.tab_id)) {
+                        const duped_label = try self.gpa.dupe(u8, parsed.value.label);
                         self.gpa.free(entry.value_ptr.label);
-                        entry.value_ptr.label = try self.gpa.dupe(u8, parsed.value.label);
+                        entry.value_ptr.label = duped_label;
                         break;
                     }
                 }
@@ -473,6 +500,19 @@ pub const Store = struct {
                 );
                 defer parsed.deinit();
                 const data = parsed.value;
+                // First pass: check if the tab exists (no mutation).
+                var found = false;
+                {
+                    var check_it = self.tabs.iterator();
+                    while (check_it.next()) |entry| {
+                        if (std.mem.eql(u8, entry.key_ptr.tab_id, data.tab_id)) {
+                            found = true;
+                            break;
+                        }
+                    }
+                }
+                if (!found) return;
+                // Second pass: apply focus.
                 var it = self.tabs.iterator();
                 while (it.next()) |entry| {
                     if (std.mem.eql(u8, entry.key_ptr.tab_id, data.tab_id)) {
@@ -582,10 +622,12 @@ fn upsertAgent(self: *Store, pane: types.PaneInfo, allow_create: bool) !void {
     };
     if (self.agents.getPtr(key)) |existing| {
         const from_status = existing.status;
+        const duped_ws = try self.gpa.dupe(u8, pane.workspace_id);
         self.gpa.free(existing.workspace_id);
-        existing.workspace_id = try self.gpa.dupe(u8, pane.workspace_id);
+        existing.workspace_id = duped_ws;
+        const duped_tab = try self.gpa.dupe(u8, pane.tab_id);
         self.gpa.free(existing.tab_id);
-        existing.tab_id = try self.gpa.dupe(u8, pane.tab_id);
+        existing.tab_id = duped_tab;
         existing.status = pane.agent_status;
         existing.revision = pane.revision;
         existing.focused = pane.focused;
@@ -1126,4 +1168,76 @@ test "applySnapshot replaces previous state cleanly" {
     try testing.expect(store.agents.get(key) != null);
     const key_p1 = AgentKey{ .device_id = "local", .pane_id = "p1" };
     try testing.expect(store.agents.get(key_p1) == null);
+}
+
+test "two consecutive workspace_updated for same workspace_id do not double-free" {
+    var store = Store.init(testing.allocator);
+    defer store.deinit();
+
+    // Seed with one workspace via snapshot.
+    const workspaces = [_]types.WorkspaceInfo{.{
+        .workspace_id = "w1",
+        .number = 1,
+        .label = "main",
+        .focused = true,
+        .pane_count = 1,
+        .tab_count = 1,
+        .active_tab_id = "tab1",
+        .agent_status = .working,
+    }};
+    try store.applySnapshot(makeSnapshot(&.{}, &workspaces, &.{}));
+
+    // First workspace_updated — replaces the existing entry.
+    const ev1_json =
+        \\{"workspace":{"workspace_id":"w1","number":1,"label":"main","focused":true,"pane_count":1,"tab_count":1,"active_tab_id":"tab1","agent_status":"working"}}
+    ;
+    const ev1 = try json.parseFromSlice(json.Value, testing.allocator, ev1_json, .{});
+    defer ev1.deinit();
+    try store.applyEvent(.{ .event = .workspace_updated, .data = ev1.value });
+
+    // Second workspace_updated — must not crash (BUG 1 regression: the old
+    // code freed old.key which is still live in the map → double free /
+    // use-after-free on the next access).
+    const ev2_json =
+        \\{"workspace":{"workspace_id":"w1","number":1,"label":"updated","focused":true,"pane_count":2,"tab_count":1,"active_tab_id":"tab1","agent_status":"working"}}
+    ;
+    const ev2 = try json.parseFromSlice(json.Value, testing.allocator, ev2_json, .{});
+    defer ev2.deinit();
+    try store.applyEvent(.{ .event = .workspace_updated, .data = ev2.value });
+
+    // Verify the label was updated to "updated".
+    var ws_it = store.workspaces.iterator();
+    while (ws_it.next()) |entry| {
+        try testing.expectEqualStrings("updated", entry.value_ptr.label);
+    }
+    // deinit() frees everything — testing.allocator catches double-free / leaks.
+}
+
+test "pane_focused for unknown pane_id is a no-op (does not clear other agents' focus)" {
+    var store = Store.init(testing.allocator);
+    defer store.deinit();
+
+    // Snapshot with one agent focused.
+    const agents = [_]types.AgentInfo{.{
+        .terminal_id = "t1",
+        .agent_status = .working,
+        .workspace_id = "w1",
+        .tab_id = "tab1",
+        .pane_id = "p1",
+        .focused = true,
+        .revision = 1,
+    }};
+    try store.applySnapshot(makeSnapshot(&agents, &.{}, &.{}));
+
+    // pane_focused for a pane that does NOT exist in the store.
+    const event_json =
+        \\{"pane_id":"unknown_pane","workspace_id":"w1"}
+    ;
+    const parsed = try json.parseFromSlice(json.Value, testing.allocator, event_json, .{});
+    defer parsed.deinit();
+    try store.applyEvent(.{ .event = .pane_focused, .data = parsed.value });
+
+    // p1 must still be focused — the unknown pane must not have cleared it.
+    const key = AgentKey{ .device_id = "local", .pane_id = "p1" };
+    try testing.expect(store.agents.get(key).?.focused);
 }
