@@ -236,3 +236,14 @@ Formato: `- [YYYY-MM-DD] #issue — qué se vio · por qué no se arregló ahora
   un futuro test de otro archivo (`area:omarchy` o de otra área) también empieza a bombear el main
   loop por defecto y se vuelve flaky sin motivo visible: sospechar primero de watchdogs huérfanos de
   un test anterior en la misma corrida antes de asumir una carrera nueva.
+- [2026-08-31] #15 — el criterio de aceptación 4 en su mitad manual (arrancar el **binario real** sin
+  `~/.local/state/omarchy/current`, comprobar el warning y que el watcher engancha cuando el
+  directorio aparece después, sin reiniciar) queda **sin verificar por decisión humana**: es el único
+  gate de la ola que mueve el estado real de Omarchy de la máquina, y el riesgo de dejar el escritorio
+  a medias no compensaba frente a lo que cubre · la mitad automatizable **sí** está cubierta por el
+  test en tmpdir de `src/omarchy/ThemeWatcher.zig`, verificado por QA y por el auditor · los
+  criterios 2 y 3 **sí** se verificaron en sesión real (UI cambia en < 1 s ida y vuelta; 20 cambios
+  seguidos → RSS 78.008 KB → 79.396 KB, +1,8 % y aplanado, con **un solo fd de inotify**) · dispara:
+  quien toque `ThemeWatcher` o el arranque del tema —#26 (paleta del terminal) o #43 (`kelpie setup`,
+  que es justo el escenario de una máquina sin `current/` poblado)— debe correr ese gate con el
+  binario real antes de cerrarse.
