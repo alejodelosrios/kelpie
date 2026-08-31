@@ -489,6 +489,20 @@ fn glyphWidget(status: types.AgentStatus) ?*gtk.Widget {
 
 const testing = std.testing;
 
+// Escenario: cero color literal en el CSS de kelpie (ADR-0001 §5, criterio 4).
+// Un grep manual que nadie corre no cuenta como cumplido — fija la regla en
+// el árbol de tests.
+test "kelpie_css carries no literal color — everything resolves via var(--…)" {
+    const app_shell = @import("app_shell.zig");
+    const css = app_shell.kelpie_css;
+    for ([_][]const u8{ "#", "rgb(", "rgba(", "hsl(", "hsla(" }) |needle| {
+        if (std.mem.indexOf(u8, css, needle)) |i| {
+            std.debug.print("kelpie_css: found literal color token \"{s}\" at byte {d}\n", .{ needle, i });
+            return error.LiteralColorInCss;
+        }
+    }
+}
+
 fn testSnapshotAgent(pane_id: []const u8, workspace_id: []const u8, status: types.AgentStatus, revision: u64) types.AgentInfo {
     return .{
         .terminal_id = pane_id,
@@ -652,4 +666,46 @@ test "buildRows: empty store produces zero rows" {
     defer freeRows(testing.allocator, rows);
 
     try testing.expectEqual(@as(usize, 0), rows.len);
+}
+
+// Every other test above leaves `snapshot.workspaces` empty, so the
+// `store.workspaces.getPtr(...)` branch in buildRows (design §Agrupado:
+// "el nombre visible del espacio sale de store.workspaces... si no está en
+// el mapa, se cae al workspace_id") never actually runs its "found" half —
+// the fallback is all any prior test could prove. This one seeds a
+// `WorkspaceInfo` with a label that differs from its `workspace_id` and
+// pins that the *label*, not the id, ends up as the row title.
+test "buildRows: workspace title comes from store.workspaces label when known" {
+    var store = Store.init(testing.allocator);
+    defer store.deinit();
+
+    const agents = [_]types.AgentInfo{
+        testSnapshotAgent("p1", "ws-a", .idle, 1),
+    };
+    const workspaces = [_]types.WorkspaceInfo{.{
+        .workspace_id = "ws-a",
+        .number = 1,
+        .label = "Proyecto Kelpie",
+        .focused = true,
+        .pane_count = 1,
+        .tab_count = 1,
+        .active_tab_id = "tab-1",
+        .agent_status = .idle,
+    }};
+    try store.applySnapshot(.{
+        .version = "1",
+        .protocol = 1,
+        .workspaces = &workspaces,
+        .tabs = &.{},
+        .panes = &.{},
+        .layouts = &.{},
+        .agents = &agents,
+    });
+
+    const rows = try buildRows(testing.allocator, &store);
+    defer freeRows(testing.allocator, rows);
+
+    try testing.expectEqual(@as(usize, 3), rows.len);
+    try testing.expectEqual(RowKind.workspace, rows[1].kind);
+    try testing.expectEqualStrings("Proyecto Kelpie", rows[1].title);
 }

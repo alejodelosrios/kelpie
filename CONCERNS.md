@@ -247,3 +247,14 @@ Formato: `- [YYYY-MM-DD] #issue — qué se vio · por qué no se arregló ahora
   quien toque `ThemeWatcher` o el arranque del tema —#26 (paleta del terminal) o #43 (`kelpie setup`,
   que es justo el escenario de una máquina sin `current/` poblado)— debe correr ese gate con el
   binario real antes de cerrarse.
+
+- **2026-08-31 · #16 (QA) · `ensureRunning: stopped_no_autostart never calls StatusReader` falla de forma
+  intermitente.** Falló una vez durante el QA de #16 con `errno 111` al conectar el socket, y no volvió a
+  reproducirse en 4 corridas más ni en 3 corridas de la rama base — o sea que **no lo causó #16**: es
+  anterior y vive en `src/herdr/LocalServer.zig`. Sospecha: socket o proceso residual de una corrida previa,
+  no una condición de carrera del código bajo prueba · **por qué importa**: un test que falla una de cada
+  cinco veces acaba enrojeciendo el CI, y la respuesta natural —relanzar el job hasta que salga verde— es
+  exactamente lo que el ruleset de este repo prohíbe; peor, entrena a leer un rojo como ruido · dispara:
+  quien vea este test rojo en CI **no lo relanza**: aísla el estado residual (ruta del socket por corrida,
+  limpieza en el `defer`) antes de tocar nada más, y quien vuelva a `LocalServer.zig` por cualquier motivo
+  (#81 es el siguiente candidato, que lo usará de verdad) lo arregla de paso.

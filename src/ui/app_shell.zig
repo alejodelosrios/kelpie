@@ -60,7 +60,7 @@ fn parseCommand(argv: []const []const u8) Command {
     return .{ .unknown = "unknown subcommand\n" };
 }
 
-const kelpie_css =
+pub const kelpie_css =
     "" ++
     ".kelpie-headerbar { min-height: 42px; }\n" ++
     ".kelpie-statusbar { min-height: 24px; }\n" ++
