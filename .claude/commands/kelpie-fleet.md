@@ -184,17 +184,63 @@ lanzó su Apply sin `script -qefc`, su log vacío no dice nada. Lo que dice algo
 
 ## FASE 4 — Cierre (nadie más lo hace)
 
-Por cada hijo que mergeó su PR:
+**El orden importa: el worktree se quita ANTES de borrar la rama.** Mientras un worktree tenga
+tomada la rama, `git branch -d` y el `--delete-branch` de `gh pr merge` fallan — y su error habla
+solo de la rama **local**, así que se lee como si el borrado remoto sí hubiera ocurrido. No ocurrió.
+Así se acumularon 12 ramas remotas huérfanas durante cuatro olas de M1 sin que nadie lo notara.
+
+Por cada hijo que mergeó su PR, en este orden:
 
 ```sh
-git worktree remove ../kelpie-<N>
-git branch -d <prefijo>/<N>-<slug>
+git -C ../kelpie-<N> status --porcelain        # mira qué quedó suelto ANTES de borrar nada
+rm -f ../kelpie-<N>/audit-<N>.md ../kelpie-<N>/apply-<N>*.log ../kelpie-<N>/qa-manual-<N>.md
+git worktree remove ../kelpie-<N>              # primero el worktree
+git branch -D <prefijo>/<N>-<slug>             # después la rama local
+git push origin --delete <prefijo>/<N>-<slug>  # y SIEMPRE la remota, explícita
 gh issue close <N>
 ```
 
-Al final: `git worktree list` y `gh issue list --state open` para confirmar que no quedaron
-worktrees huérfanos ni issues abiertos de trabajo ya mergeado. Un fleet sin cierre deja basura que
-el siguiente fleet hereda.
+El `push --delete` va explícito aunque hayas usado `gh pr merge --delete-branch`: si ese flag falló
+por el worktree, este comando es el que de verdad limpia, y si ya se borró, falla sin daño.
+
+### Verificación de cierre — las cuatro, no dos
+
+```sh
+git worktree list                              # solo el repo principal
+git branch                                     # solo develop y main
+git branch -r                                  # solo origin/develop, origin/main (y origin/HEAD)
+gh pr list --state open                        # vacío, o solo lo que dejaste abierto a propósito
+gh issue list --state open                     # ningún issue de trabajo ya mergeado
+```
+
+**`git branch -r` es la que se olvidaba**, y es justo donde se acumula la basura invisible: las
+ramas huérfanas no aparecen en `git worktree list` ni en `git branch`, y el siguiente fleet las
+hereda sin verlas.
+
+> ### ⚠️ «¿Está esta rama mergeada?» se le pregunta al PR, NUNCA al grafo de commits
+>
+> Este repo mergea con **squash**: el merge crea un commit nuevo en `develop` y los commits
+> originales de la rama **nunca** son ancestros suyos. Por eso `git rev-list develop..<rama>` y
+> `git branch --merged` dicen «tiene trabajo sin integrar» sobre ramas perfectamente mergeadas —
+> las 12 huérfanas daban entre 1 y 8 commits «pendientes». Fiarse de eso lleva a **no borrar nunca**
+> nada, o peor, a creer que hay trabajo que rescatar.
+>
+> La fuente de verdad es el estado del PR:
+>
+> ```sh
+> gh pr list --state all --limit 60 --json number,headRefName,state \
+>   --template '{{range .}}{{.headRefName}}|{{.state}}|{{.number}}{{"\n"}}{{end}}'
+> ```
+>
+> Una rama con su PR en `MERGED` se borra. Una rama **sin PR** o con PR `OPEN`/`CLOSED` se
+> investiga antes de tocarla — nunca se borra a ciegas.
+
+> ### ⚠️ `grep` no es fiable en esta máquina
+>
+> Está sombreado por algo que responde `unknown option '-G'` o imprime la versión de Claude Code.
+> Un `git status --short | grep -v ...` devuelve **vacío**, que es indistinguible de «el hijo no
+> escribió nada» — ya provocó un reporte falso de «worktree vacío» sobre uno con 16 KB de código y
+> una auditoría encima. **Usa `awk` para filtrar** en todo comando de vigilancia y de cierre.
 
 **Consolida las lecciones de la ola en `lessons-learned.md`.** Cada hijo escribe las suyas, pero tú
 ves lo que ninguno ve: lo que le pasó a **varios** a la vez —el mismo fallo en dos worktrees, un gate
