@@ -252,8 +252,28 @@ Pásale también `lessons-learned.md`: una de sus tareas es **cruzar el diff con
    > El ruleset de GitHub bloquea el merge sin `build` verde y exige la rama al día — pero **la
    > regla no depende del ruleset**: si mañana alguien afloja la protección, esto sigue vigente.
 6. **DETENTE. El merge lo aprueba el humano.** Es el gate final del dueño.
-7. Tras el merge: `gh issue close <N>`, borra la rama, y si corrías en worktree,
-   `git worktree remove` (lo hace el orquestador del fleet). Cierra el state file.
+7. Tras el merge, **en este orden** (el worktree antes que la rama, o el borrado falla):
+
+   ```sh
+   git worktree remove ../kelpie-<N>              # si corrías en worktree; lo hace el fleet
+   git branch -D <rama>                           # local
+   git push origin --delete <rama>                # remota, SIEMPRE explícito
+   gh issue close <N>
+   ```
+
+   El `push --delete` va aunque hayas usado `gh pr merge --delete-branch`: cuando ese flag falla
+   porque un worktree tiene la rama tomada, **su error habla solo de la rama local** y se lee como
+   si la remota sí se hubiera borrado. No se borró. Así se acumularon 12 ramas remotas huérfanas
+   durante cuatro olas de M1.
+
+   Comprueba con `git branch -r` que no quedó nada — no basta `git branch`, la basura vive en el
+   remoto. Y si necesitas decidir si una rama vieja es borrable, **pregúntaselo al PR, nunca al
+   grafo**: este repo mergea con squash, así que `git rev-list develop..<rama>` y
+   `git branch --merged` marcan como "no mergeadas" ramas que sí lo están. La verdad es
+   `gh pr list --state all --json headRefName,state`: PR en `MERGED` → se borra; sin PR o `OPEN` →
+   se investiga, no se toca.
+
+   Cierra el state file.
 
 `main` no se toca desde aquí: solo recibe de `develop` en release, a mano, fuera del enjambre.
 
