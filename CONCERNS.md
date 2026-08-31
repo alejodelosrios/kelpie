@@ -186,3 +186,53 @@ Formato: `- [YYYY-MM-DD] #issue — qué se vio · por qué no se arregló ahora
   en el camino normal, y el issue ya llevaba 4 rondas de Apply · dispara: si `Store.zig` vuelve a
   tocarse (el consumidor de UI, o #34 con multi-dispositivo real), vale la pena aplicar los tres de
   una vez en lugar de arrastrarlos.
+- [2026-08-31] #15 — los asserts de pared en `LocalServer.test.ensureRunning` (`src/herdr/
+  LocalServer.zig`) fallan intermitentemente bajo `zig build test` — visto en al menos dos tests
+  distintos del mismo archivo: `stopped_no_autostart` (línea 596) y `dead socket → ~1s retry window
+  → launcher called` (línea 576, `elapsed.nanoseconds < 3000 * ns_per_ms`), ~1-2 de cada 8 corridas
+  repetidas, con `errno 111`/`tryConnect` de fondo · no se tocó porque el territorio (`src/herdr/`)
+  es de `core-builder`, ajeno al diff de #15, y el fix no está dentro del alcance de este issue ·
+  dispara si el auditor de un futuro issue de `area:vt,render,pty,rpc,ssh,font` ve **cualquier**
+  assert temporal de `ensureRunning` fallar en CI, no solo estas dos líneas exactas: no es su
+  cambio, es deuda preexistente en la familia de tests de esa función — confirmarlo repitiendo
+  `zig build test` unas 8-10 veces contra `develop` antes de culpar al diff en cuestión.
+- [2026-08-31] #15 — el test de criterio 4 de `ThemeWatcher.zig`
+  (`"current/ absent at start does not crash, engages once created, and keeps reloading"`) toma un
+  snapshot `after_engage` tras bombear el main loop con un deadline de 2 s esperando el catch-up
+  reload, y luego exige `reload_count > after_engage` · si esos 2 s se agotaran sin ningún reload
+  (main loop muerto de hambre en una máquina patológicamente lenta), `after_engage` quedaría en 0 y
+  el assert final podría darse por satisfecho con el catch-up tardío en vez de con el reload real
+  post-`mkdir`/`writeFile` — un falso verde en vez de un falso rojo · no se resolvió porque requiere
+  que el main loop se inicie de hambre 2 s completos mientras se está iterando activamente, un
+  escenario no visto en ninguna corrida (auditor: 14/14 limpias) · dispara si este test aparece verde
+  de forma sospechosa en CI tras un cambio real a `armDirectoryOrAncestor`/`onFileMonitorChanged`:
+  revisar primero si el deadline de 2 s se agotó silenciosamente antes de confiar en el verde.
+- [2026-08-31] #15 — la rama de ancestro de `ThemeWatcher.armDirectoryOrAncestor`
+  (`src/omarchy/ThemeWatcher.zig:~147`) tiene el mismo agujero que tenía el bloqueante 1 del
+  camino normal, un nivel más arriba: solo reconoce que `dir_path` apareció vía `.created` o
+  `.moved_in` con basename exacto; si `current/` naciera de un `mv` desde un hermano dentro de
+  `$XDG_STATE_HOME/omarchy/`, llegaría como `.renamed` con el nombre VIEJO y el watcher nunca
+  engancharía · no se arregló porque el auditor verificó en la máquina que Omarchy no crea
+  `current/` así (nace de `mkdir` en el install, no de un `mv`) · dispara si algún día Omarchy
+  cambia cómo se provisiona `current/` por primera vez, o si un hook/instalador alternativo lo crea
+  con un rename: aplicar ahí el mismo fix que el bloqueante 1 (tratar cualquier `.renamed` en el
+  ancestro como candidato, no solo `.created`/`.moved_in`).
+- [2026-08-31] #15 — `omarchy-theme-bg-next`/`-set` reescriben el symlink `current/background`
+  dentro del mismo directorio que `ThemeWatcher` vigila; si coreutils lo hace con temp+rename, cada
+  cambio de fondo de pantalla (sin cambio de tema) dispara un `reloadTheme()` de más — idempotente,
+  ~100ms, sin fuga, pero innecesario · no se confirmó como hecho (el auditor no tenía `strace`
+  disponible en la máquina para medirlo) ni se filtró, porque filtrar por nombre exacto de archivo
+  es exactamente el patrón que ya falló una vez con `.renamed`/`"theme"` (bloqueante 1) · dispara si
+  algún día hace falta afinar cuántas veces se llama a `loadCss()` por sesión (p.ej. para un futuro
+  criterio de performance): medir primero con `strace -e trace=file` cuántos reloads de más produce
+  un cambio de fondo antes de decidir si vale la pena filtrar.
+- [2026-08-31] #15 — los helpers de test `pumpMainLoop`/`pumpUntil`
+  (`src/omarchy/ThemeWatcher.zig`) arman un `glib.timeoutAddOnce(20ms, ...)` de watchdog en cada
+  iteración del bombeo y nunca lo cancelan si el main loop ya avanzó por otra fuente primero — son
+  no-ops inofensivos hoy, pero quedan pendientes en el `MainContext` por defecto y pueden despertar
+  el `iteration()` de un test **posterior** que bombee el mismo contexto, hacer que retorne antes de
+  lo esperado, y volverlo intermitente sin causa aparente en su propio código · no se arregló porque
+  hoy solo `ThemeWatcher.zig` bombea `glib.MainContext.default()` en los tests del repo · dispara si
+  un futuro test de otro archivo (`area:omarchy` o de otra área) también empieza a bombear el main
+  loop por defecto y se vuelve flaky sin motivo visible: sospechar primero de watchdogs huérfanos de
+  un test anterior en la misma corrida antes de asumir una carrera nueva.
