@@ -13,6 +13,25 @@ pub fn main(init: std.process.Init) !void {
     var stdout: std.Io.File.Writer = .init(.stdout(), init.io, &buf);
 
     const args = try init.minimal.args.toSlice(init.arena.allocator());
+
+    // Local dispatch: subcommands that must never travel over D-Bus or touch
+    // GApplication. Checked before the flag loop so they work without a session bus.
+    if (args.len >= 2) {
+        const subcmd = args[1];
+        if (std.mem.eql(u8, subcmd, "setup")) {
+            // ponytail: stub — setup feature not yet implemented (future issue).
+            try stdout.interface.print("setup: not yet implemented\n", .{});
+            try stdout.interface.flush();
+            return;
+        }
+        if (std.mem.eql(u8, subcmd, "askpass")) {
+            // ponytail: stub — askpass feature not yet implemented (future issue).
+            try stdout.interface.print("askpass: not yet implemented\n", .{});
+            try stdout.interface.flush();
+            return;
+        }
+    }
+
     var vt_info = false;
     var herdr_probe_flag = false;
     var run_spike_b = false;

@@ -13,6 +13,49 @@ const adw = @import("adw");
 
 const app_id = "io.github.alejodelosrios.kelpie";
 
+/// Parsed subcommand from the command-line handler. Pure data — no GObject
+/// dependency — so `parseCommand` is testable without a running application.
+const Command = union(enum) {
+    /// No subcommand (or empty argv): activate the primary instance.
+    activate,
+    /// `focus <device>/<pane>` — select an agent in the sidebar.
+    focus: struct { device: []const u8, pane: []const u8 },
+    /// `reload-theme` — re-read and apply the Omarchy theme CSS.
+    reload_theme,
+    /// `reload-font` — (not yet implemented, area:font).
+    reload_font,
+    /// Recognised subcommand with malformed arguments; `msg` is a static string.
+    malformed: [*:0]const u8,
+    /// Unrecognised subcommand name.
+    unknown: [*:0]const u8,
+};
+
+/// Pure parser: takes a slice of UTF-8 strings (already spanned from `[*:0]u8`)
+/// and returns the corresponding `Command`. No side effects, no allocations.
+fn parseCommand(argv: []const []const u8) Command {
+    if (argv.len == 0) return .activate;
+
+    const subcmd = argv[0];
+    if (std.mem.eql(u8, subcmd, "focus")) {
+        if (argv.len < 2) return .{ .malformed = "focus: missing <device>/<pane> argument\n" };
+        const target = argv[1];
+        const slash_pos = std.mem.indexOfScalar(u8, target, '/');
+        if (slash_pos == null or slash_pos.? == 0)
+            return .{ .malformed = "focus: argument must be <device>/<pane>\n" };
+        const pos = slash_pos.?;
+        if (pos + 1 >= target.len)
+            return .{ .malformed = "focus: pane part is empty\n" };
+        return .{ .focus = .{
+            .device = target[0..pos],
+            .pane = target[pos + 1 ..],
+        } };
+    }
+    if (std.mem.eql(u8, subcmd, "reload-theme")) return .reload_theme;
+    if (std.mem.eql(u8, subcmd, "reload-font")) return .reload_font;
+
+    return .{ .unknown = "unknown subcommand\n" };
+}
+
 const kelpie_css =
     "" ++
     ".kelpie-headerbar { min-height: 42px; }\n" ++
@@ -22,6 +65,13 @@ const kelpie_css =
 // Set once in run(), before gio.Application.run() hands control to GTK; read by
 // onActivate(). Single instance, single thread — no synchronization needed.
 var empty_state_text: [*:0]const u8 = "No agents";
+
+// CssProviders: created and registered with the display once (first loadCss
+// call); subsequent calls reuse the same providers and just reload the data.
+// loadFromPath/loadFromString clear previous content, so the cascade updates
+// in place without accumulating providers. Single thread — no sync.
+var struct_provider: ?*gtk.CssProvider = null;
+var theme_provider: ?*gtk.CssProvider = null;
 
 /// Picks the empty-state label text by locale prefix (see design #13 §"No entra" —
 /// no translation framework, just a `LANG`/`LC_ALL` prefix check).
@@ -33,19 +83,39 @@ pub fn run(init: std.process.Init) u8 {
     const lang = init.environ_map.get("LANG") orelse init.environ_map.get("LC_ALL") orelse "";
     empty_state_text = emptyStateText(lang);
 
-    const app = adw.Application.new(app_id, .{});
+    const app = adw.Application.new(app_id, .{ .handles_command_line = true });
     defer gobject.Object.unref(gobject.ext.as(gobject.Object, app));
 
     _ = gio.Application.signals.activate.connect(app, ?*anyopaque, &onActivate, null, .{});
+    _ = gio.Application.signals.command_line.connect(app, ?*anyopaque, &onCommandLine, null, .{});
 
-    const status = gio.Application.run(gobject.ext.as(gio.Application, app), 0, null);
+    // Build real argv from init so GIO sends remaining args to the primary
+    // instance (G_APPLICATION_HANDLES_COMMAND_LINE requires real argv — passing
+    // argc=0/argv=null makes the feature inert).
+    const args = init.minimal.args.toSlice(init.arena.allocator()) catch return 1;
+    var argv_buf: [16][*:0]u8 = undefined;
+    const argc: c_int = @intCast(@min(args.len, argv_buf.len));
+    for (0..@intCast(argc)) |i| {
+        argv_buf[i] = @constCast(args[i].ptr);
+    }
+
+    const status = gio.Application.run(gobject.ext.as(gio.Application, app), argc, &argv_buf);
     return if (status < 0 or status > 255) 1 else @intCast(status);
 }
 
 fn onActivate(app: *adw.Application, _: ?*anyopaque) callconv(.c) void {
     loadCss();
 
+    // Idempotent: if the window already exists (e.g. command-line triggered
+    // activate() after a focus command), just present it — don't create a duplicate.
+    // Uses GTK's own accounting (getActiveWindow) instead of a global that could
+    // become a dangling pointer if the window is destroyed between signals.
     const gtk_app = gobject.ext.as(gtk.Application, app);
+    if (gtk.Application.getActiveWindow(gtk_app)) |w| {
+        gtk.Window.present(w);
+        return;
+    }
+
     const window = adw.ApplicationWindow.new(gtk_app);
     gtk.Window.setDefaultSize(gobject.ext.as(gtk.Window, window), 1100, 700);
     gtk.Window.setTitle(gobject.ext.as(gtk.Window, window), "kelpie");
@@ -83,37 +153,123 @@ fn onActivate(app: *adw.Application, _: ?*anyopaque) callconv(.c) void {
     gtk.Window.present(gobject.ext.as(gtk.Window, window));
 }
 
+/// GApplication command-line handler. Receives remote invocations (e.g.
+/// `kelpie focus local/pane1`) and dispatches them to the appropriate action.
+///
+/// Return value: the exit status (0 = success, 1 = error). GIO passes this
+/// value to `ApplicationCommandLine.setExitStatus` after the handler returns
+/// (gio2.zig:2025-2029, gio.Application.signals.command-line documentation),
+/// so the return value IS the real exit status — we must not hardcode 0.
+fn onCommandLine(app: *adw.Application, cmdline: *gio.ApplicationCommandLine, _: ?*anyopaque) callconv(.c) c_int {
+    var status: c_int = 0;
+
+    var argc: c_int = 0;
+    const argv_raw = gio.ApplicationCommandLine.getArguments(cmdline, &argc);
+    defer glib.strfreev(@ptrCast(argv_raw));
+    // argv_raw is [*][*:0]u8, NULL-terminated. argc includes the program name.
+    // Convert to [][]const u8 for the pure parser (skip argv[0] = program name).
+    const count: usize = @intCast(argc);
+    if (count < 2) {
+        // No subcommand: just activate the primary instance.
+        gio.Application.activate(gobject.ext.as(gio.Application, app));
+        gio.ApplicationCommandLine.setExitStatus(cmdline, status);
+        return status;
+    }
+
+    // Build a slice of []const u8 from argv[1..argc] for parseCommand.
+    var args_buf: [16][]const u8 = undefined;
+    const arg_count = @min(count - 1, args_buf.len);
+    for (0..arg_count) |i| {
+        args_buf[i] = std.mem.span(argv_raw[i + 1]);
+    }
+    const cmd = parseCommand(args_buf[0..arg_count]);
+
+    switch (cmd) {
+        .activate => {
+            gio.Application.activate(gobject.ext.as(gio.Application, app));
+        },
+        .focus => |f| {
+            if (focusAgent(f.device, f.pane)) {
+                gio.Application.activate(gobject.ext.as(gio.Application, app));
+                // Present the window (the seam always returns false today, so
+                // this path is unreachable until #16/#19 land — but it's correct).
+                const gtk_app = gobject.ext.as(gtk.Application, app);
+                if (gtk.Application.getActiveWindow(gtk_app)) |w| gtk.Window.present(w);
+            } else {
+                // ponytail: no agent model until #16 (sidebar) and #19 (attach).
+                // This is the truth of today, not a false stub.
+                cmdline.printerrLiteral("focus: agente no encontrado\n");
+                status = 1;
+            }
+        },
+        .reload_theme => {
+            reloadTheme();
+        },
+        .reload_font => {
+            // ponytail: area:font has not been started yet. The command arrives,
+            // dispatches, and responds with an explicit warning — nothing more.
+            cmdline.printerrLiteral("reload-font: no implementado (area:font)\n");
+        },
+        .malformed => |msg| {
+            cmdline.printerrLiteral(msg);
+            status = 1;
+        },
+        .unknown => |msg| {
+            cmdline.printerrLiteral(msg);
+            status = 1;
+        },
+    }
+    gio.ApplicationCommandLine.setExitStatus(cmdline, status);
+    return status;
+}
+
+/// Seam for selecting an agent in the sidebar. Always returns false today —
+/// there is no agent model until #16 (sidebar) and #19 (attach) land.
+/// Replace with a real Store query when #16 delivers the sidebar.
+fn focusAgent(device: []const u8, pane: []const u8) bool {
+    _ = device;
+    _ = pane;
+    return false;
+}
+
+/// Re-applies the theme CSS. Callable from both `onActivate` (startup) and
+/// the `reload-theme` command-line subcommand.
+fn reloadTheme() void {
+    loadCss();
+}
+
 fn loadCss() void {
     const display = gdk.Display.getDefault() orelse return;
 
     // 1. Structural CSS (heights, typography) — always from the embedded constant.
-    const struct_provider = gtk.CssProvider.new();
-    defer gobject.Object.unref(gobject.ext.as(gobject.Object, struct_provider));
-    gtk.CssProvider.loadFromString(struct_provider, kelpie_css);
-    gtk.StyleContext.addProviderForDisplay(
-        display,
-        gobject.ext.as(gtk.StyleProvider, struct_provider),
-        gtk.STYLE_PROVIDER_PRIORITY_APPLICATION,
-    );
+    if (struct_provider == null) {
+        struct_provider = gtk.CssProvider.new();
+        gtk.StyleContext.addProviderForDisplay(
+            display,
+            gobject.ext.as(gtk.StyleProvider, struct_provider.?),
+            gtk.STYLE_PROVIDER_PRIORITY_APPLICATION,
+        );
+    }
+    gtk.CssProvider.loadFromString(struct_provider.?, kelpie_css);
 
     // 2. Theme CSS (colors) — from Omarchy's generated file or embedded fallback.
-    const theme_provider = gtk.CssProvider.new();
-    defer gobject.Object.unref(gobject.ext.as(gobject.Object, theme_provider));
+    if (theme_provider == null) {
+        theme_provider = gtk.CssProvider.new();
+        gtk.StyleContext.addProviderForDisplay(
+            display,
+            gobject.ext.as(gtk.StyleProvider, theme_provider.?),
+            gtk.STYLE_PROVIDER_PRIORITY_APPLICATION,
+        );
+    }
 
     var path_buf: [std.fs.max_path_bytes]u8 = undefined;
     if (findThemeCssPath(&path_buf)) |path| {
-        gtk.CssProvider.loadFromPath(theme_provider, path);
+        gtk.CssProvider.loadFromPath(theme_provider.?, path);
     } else {
         const fallback_css: [*:0]const u8 = @embedFile("kelpie-fallback-css");
-        gtk.CssProvider.loadFromString(theme_provider, fallback_css);
+        gtk.CssProvider.loadFromString(theme_provider.?, fallback_css);
         std.log.warn("theme CSS not found, using fallback", .{});
     }
-
-    gtk.StyleContext.addProviderForDisplay(
-        display,
-        gobject.ext.as(gtk.StyleProvider, theme_provider),
-        gtk.STYLE_PROVIDER_PRIORITY_APPLICATION,
-    );
 }
 
 /// Returns the path to `~/.local/state/omarchy/current/theme/kelpie.css`
@@ -175,3 +331,101 @@ test "emptyStateText does not match locales that merely contain es, only a leadi
     // "test_ES" doesn't start with "es" (case-sensitive, prefix check) — must fall back to English.
     try std.testing.expectEqualStrings("No agents", std.mem.span(emptyStateText("fr_es_FR")));
 }
+
+// --- parseCommand tests ---
+
+test "parseCommand: empty argv returns activate" {
+    const cmd = parseCommand(&.{});
+    try std.testing.expectEqual(Command.activate, cmd);
+}
+
+test "parseCommand: focus with valid device/pane" {
+    const cmd = parseCommand(&.{ "focus", "local/p1" });
+    try std.testing.expect(cmd == .focus);
+    try std.testing.expectEqualStrings("local", cmd.focus.device);
+    try std.testing.expectEqualStrings("p1", cmd.focus.pane);
+}
+
+test "parseCommand: focus with multi-char device and pane" {
+    const cmd = parseCommand(&.{ "focus", "my-laptop/terminal-3" });
+    try std.testing.expect(cmd == .focus);
+    try std.testing.expectEqualStrings("my-laptop", cmd.focus.device);
+    try std.testing.expectEqualStrings("terminal-3", cmd.focus.pane);
+}
+
+test "parseCommand: focus missing argument is malformed" {
+    const cmd = parseCommand(&.{"focus"});
+    try std.testing.expect(cmd == .malformed);
+}
+
+test "parseCommand: focus without slash is malformed" {
+    const cmd = parseCommand(&.{ "focus", "noslash" });
+    try std.testing.expect(cmd == .malformed);
+}
+
+test "parseCommand: focus with leading slash (empty device) is malformed" {
+    const cmd = parseCommand(&.{ "focus", "/pane" });
+    try std.testing.expect(cmd == .malformed);
+}
+
+test "parseCommand: focus with trailing slash (empty pane) is malformed" {
+    const cmd = parseCommand(&.{ "focus", "device/" });
+    try std.testing.expect(cmd == .malformed);
+}
+
+test "parseCommand: reload-theme" {
+    const cmd = parseCommand(&.{"reload-theme"});
+    try std.testing.expectEqual(Command.reload_theme, cmd);
+}
+
+test "parseCommand: reload-font" {
+    const cmd = parseCommand(&.{"reload-font"});
+    try std.testing.expectEqual(Command.reload_font, cmd);
+}
+
+test "parseCommand: unknown subcommand" {
+    const cmd = parseCommand(&.{"dance"});
+    try std.testing.expect(cmd == .unknown);
+}
+
+test "parseCommand: focus missing argument message names the expected form" {
+    const cmd = parseCommand(&.{"focus"});
+    try std.testing.expectEqualStrings("focus: missing <device>/<pane> argument\n", std.mem.span(cmd.malformed));
+}
+
+test "parseCommand: focus without slash message names the expected form" {
+    const cmd = parseCommand(&.{ "focus", "noslash" });
+    try std.testing.expectEqualStrings("focus: argument must be <device>/<pane>\n", std.mem.span(cmd.malformed));
+}
+
+test "parseCommand: focus with empty pane after slash message mentions pane" {
+    // "device/" — slash present, pane part is empty. Distinct malformed message
+    // from the missing-slash case; a builder could accidentally reuse the wrong
+    // static string here, so pin the exact text.
+    const cmd = parseCommand(&.{ "focus", "device/" });
+    try std.testing.expectEqualStrings("focus: pane part is empty\n", std.mem.span(cmd.malformed));
+}
+
+// --- focusAgent (seam, criterio 1/3 del diseño #17) ---
+
+test "focusAgent: seam always reports not-found today (no agent model until #16/#19)" {
+    // This is the actual behavior of scenario "focus con kelpie ya abierta y
+    // agente inexistente": focusAgent(device, pane) -> false for any input,
+    // because there is no agent model yet. Pin it directly so a future change
+    // that accidentally starts returning true for some input doesn't slip by
+    // silently before #16/#19 wire a real Store.
+    try std.testing.expect(!focusAgent("local", "p1"));
+    try std.testing.expect(!focusAgent("local", "no-existe"));
+    try std.testing.expect(!focusAgent("", ""));
+}
+
+// Scenario "focus con un pane conocido inyectado por el seam de test" (criterio 1)
+// cannot be exercised as a pure unit test without either (a) mocking D-Bus/GIO,
+// which the design explicitly forbids, or (b) temporarily patching focusAgent's
+// body to return true and driving a real second `kelpie focus local/<pane>`
+// invocation against a running primary instance. There is no test-only
+// injection point in production code today (focusAgent takes no override and
+// the design doesn't ask for one — see #17 "Riesgos", condición 3). QA cannot
+// add that seam without touching production logic, which is Apply's job, not
+// QA's. This scenario is therefore reported below as a manual gate, not
+// skipped.
