@@ -57,3 +57,30 @@ no reconozca todavía (el mensaje crudo sigue disponible en `RpcError.message`).
 1. `HERDR_SOCKET_PATH`, verbatim, si está puesto.
 2. `$XDG_CONFIG_HOME/herdr/herdr.sock`, si `XDG_CONFIG_HOME` está puesto.
 3. `$HOME/.config/herdr/herdr.sock`, como último recurso.
+
+## `Events.zig` — suscripción persistente con reconexión
+
+`EventsClient` (`Events.zig`) mantiene un `events.subscribe` abierto en su propio hilo
+(`std.Thread.spawn`) y entrega cada `EventEnvelope` y cada re-`session.snapshot` de reconexión a
+través de `on_event`/`on_resynced`. Ver `roadmap/designs/10-eventos-reconexion.md` para la spec y
+los escenarios Gherkin completos.
+
+### `Dispatcher` y `Sleeper` — las dos costuras inyectables
+
+`EventsClient` nunca llama a `on_event`/`on_resynced` directamente desde su hilo lector: siempre
+pasa por `dispatcher.invoke(task, task_ctx)`. Producción envuelve `glib.MainContext.invoke` — ese
+binding vive en un issue de UI futuro; `Events.zig` no importa `gobject` (decisión de diseño
+tomada con el orquestador, ver el diseño). `Sleeper.sleep(ms)` reemplaza `Io.sleep` en el ciclo de
+backoff; `IoSleeper` es la implementación de producción, respaldada en `Io.sleep` real. Los tests
+inyectan dobles que graban sin bloquear, lo que hace el backoff y el aislamiento de hilo
+verificables sin relojes reales.
+
+### Contrato de reconexión
+
+Ante EOF o error de lectura, `EventsClient` cierra la conexión y reconecta con backoff
+`1,2,4,8,16,30,30…` segundos (tope 30 s). El backoff se resetea a 1 s en cuanto llega el ack
+`subscription_started` de una nueva suscripción — sin esperar a que el ciclo entero tenga éxito.
+Cada reconexión exitosa dispara un `session.snapshot` fresco (conexión aparte, one-shot) antes de
+volver a leer eventos, para que el consumidor pueda resincronizar su estado sin perder eventos
+intermedios. `stop()` es limpio: usa `stream.shutdown(io, .recv)` (mismo mecanismo que el
+`Watchdog` de `client.zig:130-156`) para desbloquear una lectura en curso, y hace `Thread.join()`.
