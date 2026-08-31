@@ -278,3 +278,16 @@ Formato: `- [YYYY-MM-DD] #issue — qué se vio · por qué no se arregló ahora
   importa**: un Gherkin que describe una llamada que nadie hace es un criterio que se da por cumplido
   leyéndolo · dispara: **#19 (attach)**, que es quien conecta esa costura de verdad — al hacerlo, reescribe
   el escenario 7 en términos de lo que realmente ocurre y lo cubre con test.
+
+- **2026-08-31 · #16 / #14 · en temas monocromos los tres colores de estado colapsan.** La plantilla
+  `data/themed/kelpie.css.tpl:33-35` mapea `working→blue`, `blocked→yellow`, `done→green`, que es el
+  mapeo correcto según la skill `omarchy-app`. Pero un tema derivado de wallpaper puede no tener tres
+  colores distinguibles: en `wallhaven-5yk2o9` (el activo al hacer el gate visual de #16) `blue=#678194`,
+  `yellow=#c6f9ff`, `green=#9fc7d4` — tres azules. Y `orange=#97a4b7` es **peor** que `yellow`, así que
+  la regla alternativa de la skill ("si el tema trae `orange`, `orange`") tampoco salva el caso ·
+  **por qué importa**: el valor #1 del producto es que se distinga de un vistazo qué agente reclama
+  atención, y en estos temas el color no lo distingue. Lo que sí lo distingue es la **forma** del glifo
+  —spinner / triángulo con `!` / check—, que el diseño de #16 especificó por separado; es la razón por
+  la que el sidebar sigue siendo legible aquí · dispara: **#36** (sistema de diseño) y **#40** (gate M4,
+  retematizar en vivo): antes de dar por bueno el mapeo semántico, probar con un tema monocromo y
+  decidir si `blocked` necesita algo que no dependa del color del tema (peso, tamaño o un realce propio).

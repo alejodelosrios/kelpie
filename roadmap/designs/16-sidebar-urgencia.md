@@ -257,6 +257,15 @@ Escenario: el click enfoca al agente
 - **Nerd Font**: los glifos `󰀦` / `󰄬` dependen de que la `monospace` de fontconfig sea una Nerd
   Font. Omarchy la instala, pero si no lo fuera se vería un tofu. No se añade fallback en este
   issue (sería una decisión de fuente, `area:font`, #22).
+- **RESUELTO en el gate visual (decisión del humano, 2026-08-31)**: el hueco de abajo se disparó.
+  `setShowSeparators` pintaba de borde a borde tras **cada** fila y con **su** color, no con
+  `--hairline`: medido sobre captura, pico `rgb(30,32,33)` donde el token da `rgb(16,17,18)` — el
+  doble de brillo. Se quitó `setShowSeparators`; ahora hay hairline **solo entre grupos**, en las
+  filas de espacio, y se inserta 12 px por lado con un `linear-gradient` en vez de un `margin`
+  (un margen movería también el texto de la cabecera y lo desalinearía de las filas de agente).
+  Medido después: pico `rgb(13,14,14)`, o sea el token. El criterio 2 pasa a leerse "hairline de
+  1 px entre grupos", no "entre todas las filas".
+
 - **Hueco declarado, no supuesto**: no se verificó en la fuente si `gtk.ListView.setShowSeparators`
   aplica el separador también entre la última fila de un espacio y la primera del siguiente, ni si
   el separador es un nodo `separator` estilable por CSS en GTK 4.20. Si el gate visual del

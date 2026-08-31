@@ -78,7 +78,17 @@ pub const kelpie_css =
     ".kelpie-sidebar-list row { background: transparent; }\n" ++
     ".kelpie-sidebar-list row:hover { background: var(--item-wash); }\n" ++
     ".kelpie-sidebar-list row:selected { background: var(--item-wash-selected); }\n" ++
-    ".kelpie-sidebar-list row separator { min-height: 1px; background: var(--hairline); }\n" ++
+    // Hairline SOLO entre grupos, e insertado: nada de rejilla de borde a borde.
+    // El margen lateral va en la caja de la fila, no en el nodo `row`, para que
+    // el wash de hover/selección siga llegando a los bordes.
+    // La línea se inserta con un gradiente, no con `margin`: un margen movería
+    // también el texto de la cabecera y la desalinearía de las filas de agente.
+    ".kelpie-row-workspace {" ++
+    " background-image: linear-gradient(to right," ++
+    " transparent 12px, var(--hairline) 12px," ++
+    " var(--hairline) calc(100% - 12px), transparent calc(100% - 12px));" ++
+    " background-size: 100% 1px; background-repeat: no-repeat;" ++
+    " background-position: top left; }\n" ++
     ".kelpie-row-title { color: var(--text-1); font-size: 13px; font-weight: 500; }\n" ++
     ".kelpie-row-subtitle { color: var(--text-2); font-size: 11.5px; }\n" ++
     ".kelpie-glyph-working { color: var(--status-working); }\n" ++

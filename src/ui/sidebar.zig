@@ -270,7 +270,12 @@ pub const Sidebar = struct {
             gobject.ext.as(gtk.SelectionModel, self.selection),
             gobject.ext.as(gtk.ListItemFactory, factory),
         );
-        gtk.ListView.setShowSeparators(list_view, 1);
+        // No `setShowSeparators`: GTK pinta su propio separador de borde a borde
+        // tras CADA fila, y encima con su color, no con `--hairline` (medido:
+        // rgb(30,32,33) donde el token da rgb(16,17,18) — el doble de brillo).
+        // La separación la da un `border-top` insertado sobre las filas de
+        // espacio, así que solo hay línea ENTRE grupos. Es la alternativa que el
+        // diseño ya nombró para este hueco (§"Riesgos y preguntas abiertas").
         gtk.ListView.setSingleClickActivate(list_view, 1);
         _ = gtk.ListView.signals.activate.connect(list_view, *Sidebar, &onActivate, self, .{});
         gtk.Widget.addCssClass(gobject.ext.as(gtk.Widget, list_view), "kelpie-sidebar-list");
