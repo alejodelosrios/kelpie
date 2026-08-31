@@ -770,6 +770,7 @@ fn makeAgentInfo(pane_id: []const u8, status: types.AgentStatus, revision: u64) 
 
 const TestObserver = struct {
     changed_count: u32 = 0,
+    transition_count: u32 = 0,
     last_transition_from: ?types.AgentStatus = null,
     last_transition_to: ?types.AgentStatus = null,
     last_transition_agent: ?*const Agent = null,
@@ -789,6 +790,7 @@ const TestObserver = struct {
 
     fn onTransitionImpl(ptr: *anyopaque, agent: *const Agent, from: types.AgentStatus, to: types.AgentStatus) void {
         const self: *TestObserver = @ptrCast(@alignCast(ptr));
+        self.transition_count += 1;
         self.last_transition_from = from;
         self.last_transition_to = to;
         self.last_transition_agent = agent;
@@ -848,6 +850,7 @@ test "transition reorders and notifies exactly once" {
     try store.applyEvent(envelope);
 
     // onTransition fired exactly once with working -> blocked
+    try testing.expectEqual(@as(u32, 1), obs.transition_count);
     try testing.expectEqual(types.AgentStatus.working, obs.last_transition_from);
     try testing.expectEqual(types.AgentStatus.blocked, obs.last_transition_to);
 
