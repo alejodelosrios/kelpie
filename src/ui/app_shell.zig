@@ -10,6 +10,7 @@ const gio = @import("gio");
 const gtk = @import("gtk");
 const gdk = @import("gdk");
 const adw = @import("adw");
+const ThemeWatcher = @import("../omarchy/ThemeWatcher.zig");
 
 const app_id = "io.github.alejodelosrios.kelpie";
 
@@ -73,6 +74,12 @@ var empty_state_text: [*:0]const u8 = "No agents";
 var struct_provider: ?*gtk.CssProvider = null;
 var theme_provider: ?*gtk.CssProvider = null;
 
+// Watches $XDG_STATE_HOME/omarchy/current/ (or ~/.local/state/omarchy/current/)
+// for theme changes and re-applies the CSS live (#15). Started once from
+// onActivate, same single-thread/no-sync pattern as the providers above.
+var theme_watcher: ThemeWatcher = .{};
+var theme_watcher_started: bool = false;
+
 /// Picks the empty-state label text by locale prefix (see design #13 §"No entra" —
 /// no translation framework, just a `LANG`/`LC_ALL` prefix check).
 fn emptyStateText(lang: []const u8) [*:0]const u8 {
@@ -115,6 +122,8 @@ fn onActivate(app: *adw.Application, _: ?*anyopaque) callconv(.c) void {
         gtk.Window.present(w);
         return;
     }
+
+    startThemeWatcherOnce();
 
     const window = adw.ApplicationWindow.new(gtk_app);
     gtk.Window.setDefaultSize(gobject.ext.as(gtk.Window, window), 1100, 700);
@@ -295,6 +304,38 @@ fn findThemeCssPath(buf: *[std.fs.max_path_bytes]u8) ?[*:0]const u8 {
     return path;
 }
 
+/// Arms the theme watcher once, on the `current/` directory (same
+/// $XDG_STATE_HOME/HOME resolution as `findThemeCssPath`, one level up from
+/// the CSS file itself — the watcher needs the directory Omarchy replaces
+/// wholesale, not the file). Idempotent: onActivate can run again (e.g. a
+/// second `activate` signal) without re-arming.
+fn startThemeWatcherOnce() void {
+    if (theme_watcher_started) return;
+    theme_watcher_started = true;
+
+    var dir_buf: [std.fs.max_path_bytes]u8 = undefined;
+    if (findThemeCurrentDir(&dir_buf)) |dir| {
+        theme_watcher.start(dir, &onThemeWatcherReload, null);
+    }
+}
+
+fn onThemeWatcherReload(_: ?*anyopaque) void {
+    reloadTheme();
+}
+
+/// Returns `$XDG_STATE_HOME/omarchy/current` (or
+/// `~/.local/state/omarchy/current` if unset) — the directory
+/// `omarchy-theme-set` replaces wholesale (`rm -rf` + `mv`). Unlike
+/// `findThemeCssPath`, does not check existence: `ThemeWatcher.start` already
+/// tolerates a directory that doesn't exist yet (design #15 "Riesgos").
+fn findThemeCurrentDir(buf: *[std.fs.max_path_bytes]u8) ?[]const u8 {
+    const state_home = std.c.getenv("XDG_STATE_HOME");
+    if (state_home) |sh|
+        return std.fmt.bufPrint(buf, "{s}/omarchy/current", .{std.mem.span(sh)}) catch null;
+    const home = std.c.getenv("HOME") orelse return null;
+    return std.fmt.bufPrint(buf, "{s}/.local/state/omarchy/current", .{std.mem.span(home)}) catch null;
+}
+
 fn addSidebarToggleShortcut(widget: *gtk.Widget, split: *adw.OverlaySplitView) void {
     const trigger = gtk.ShortcutTrigger.parseString("<Control>b") orelse return;
     const action = gtk.CallbackAction.new(&toggleSidebar, @ptrCast(split), null);
@@ -309,6 +350,14 @@ fn toggleSidebar(_: *gtk.Widget, _: ?*glib.Variant, user_data: ?*anyopaque) call
     const shown = adw.OverlaySplitView.getShowSidebar(split);
     adw.OverlaySplitView.setShowSidebar(split, @intFromBool(shown == 0));
     return 1; // handled
+}
+
+// ThemeWatcher.zig has a consumer in this file (startThemeWatcherOnce), so
+// its tests don't need a build.zig entry of their own (see design #15 §"No
+// toca build.zig") — this makes them run under `zig build test` the same
+// way main.zig's `test { _ = app_shell; }` already runs this file's tests.
+test {
+    _ = ThemeWatcher;
 }
 
 test "emptyStateText picks Spanish for an es locale" {
