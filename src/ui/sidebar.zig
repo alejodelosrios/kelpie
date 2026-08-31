@@ -103,14 +103,8 @@ pub fn buildRows(gpa: std.mem.Allocator, store: *Store) ![]Row {
 
     // Exactly one device in M1 ("local") — see design §"No entra" on why this
     // is a plain row, not a `gtk.SectionModel` section.
-    try rows.append(.{
-        .kind = .device,
-        .status = .idle,
-        .title = try gpa.dupeZ(u8, "local"),
-        .subtitle = null,
-        .device = try gpa.dupe(u8, "local"),
-        .pane = try gpa.dupe(u8, ""),
-    });
+    try rows.ensureUnusedCapacity(1);
+    rows.appendAssumeCapacity(try makeRow(gpa, .device, .idle, "local", null, "local", ""));
 
     for (groups.items) |g| {
         // The aggregated status IS the first agent's status in this group —
@@ -122,28 +116,64 @@ pub fn buildRows(gpa: std.mem.Allocator, store: *Store) ![]Row {
             .workspace_id = g.workspace_id,
         })) |info| info.label else g.workspace_id;
 
-        try rows.append(.{
-            .kind = .workspace,
-            .status = ws_status,
-            .title = try gpa.dupeZ(u8, ws_title),
-            .subtitle = null,
-            .device = try gpa.dupe(u8, g.device_id),
-            .pane = try gpa.dupe(u8, ""),
-        });
+        try rows.ensureUnusedCapacity(1);
+        rows.appendAssumeCapacity(try makeRow(gpa, .workspace, ws_status, ws_title, null, g.device_id, ""));
 
         for (g.agents.items) |agent| {
-            try rows.append(.{
-                .kind = .agent,
-                .status = agent.status,
-                .title = try gpa.dupeZ(u8, agent.displayTitle()),
-                .subtitle = try buildSubtitle(gpa, agent),
-                .device = try gpa.dupe(u8, agent.device_id),
-                .pane = try gpa.dupe(u8, agent.pane_id),
-            });
+            try rows.ensureUnusedCapacity(1);
+            const subtitle = try buildSubtitle(gpa, agent);
+            rows.appendAssumeCapacity(try makeRow(
+                gpa,
+                .agent,
+                agent.status,
+                agent.displayTitle(),
+                subtitle,
+                agent.device_id,
+                agent.pane_id,
+            ));
         }
     }
 
     return rows.toOwnedSlice();
+}
+
+/// Builds one `Row`, duplicating `title`/`device`/`pane` with `gpa` and taking
+/// ownership of an already-built `subtitle` (built by the caller, since only
+/// `.agent` rows have one). A struct literal with several fallible fields
+/// isn't atomic (result-location semantics write earlier fields before a
+/// later `try` can fail) — this repo has hit that root cause before
+/// (`Connection.open`, `openLive`, `request()` in the `zig-libghostty` skill).
+/// Here the destination is a temporary the caller discards on error, so a
+/// failure only leaks 1-3 allocations under OOM — not the UB those three
+/// were — but each `errdefer` below still cleans up what came before it.
+fn makeRow(
+    gpa: std.mem.Allocator,
+    kind: RowKind,
+    status: types.AgentStatus,
+    title: []const u8,
+    subtitle: ?[:0]u8,
+    device: []const u8,
+    pane: []const u8,
+) !Row {
+    errdefer if (subtitle) |s| gpa.free(s);
+
+    const title_z = try gpa.dupeZ(u8, title);
+    errdefer gpa.free(title_z);
+
+    const device_dup = try gpa.dupe(u8, device);
+    errdefer gpa.free(device_dup);
+
+    const pane_dup = try gpa.dupe(u8, pane);
+    errdefer gpa.free(pane_dup);
+
+    return .{
+        .kind = kind,
+        .status = status,
+        .title = title_z,
+        .subtitle = subtitle,
+        .device = device_dup,
+        .pane = pane_dup,
+    };
 }
 
 /// "agente · cwd" (design table, fila `.agent`) — either half may be absent;
@@ -313,11 +343,16 @@ pub const Sidebar = struct {
         }
         defer for (objects) |obj| gobject.Object.unref(obj);
 
-        const old_n = gio.ListModel.getNItems(gobject.ext.as(gio.ListModel, self.list_store));
-        gio.ListStore.splice(self.list_store, 0, old_n, objects.ptr, @intCast(objects.len));
-
+        // `onBind` reads `self.rows` synchronously while `splice` runs (GTK binds
+        // items as they're inserted, not on some later idle) — the swap has to
+        // happen before the splice, or every row paints the stale model. Safe to
+        // free the old rows here: `buildRows` above already succeeded, so this is
+        // the only point after which nothing can fail.
         freeRows(self.gpa, self.rows);
         self.rows = new_rows;
+
+        const old_n = gio.ListModel.getNItems(gobject.ext.as(gio.ListModel, self.list_store));
+        gio.ListStore.splice(self.list_store, 0, old_n, objects.ptr, @intCast(objects.len));
 
         if (restore) |r| _ = self.selectByKey(r.device, r.pane);
     }
@@ -551,11 +586,15 @@ test "buildRows: an agent going blocked pulls its workspace to first place" {
     var store = Store.init(testing.allocator);
     defer store.deinit();
 
+    // Revisions descending pick ws-a first with no blocking at all (urgency
+    // tie -> revision desc), so the control assertion below is a real red
+    // without the applyEvent — proving the reorder, not just restating the
+    // pre-existing revision order.
     const agents = [_]types.AgentInfo{
-        testSnapshotAgent("p1", "ws-a", .idle, 1),
-        testSnapshotAgent("p2", "ws-a", .idle, 2),
-        testSnapshotAgent("p3", "ws-b", .idle, 3),
-        testSnapshotAgent("p4", "ws-b", .idle, 4),
+        testSnapshotAgent("p1", "ws-a", .idle, 4),
+        testSnapshotAgent("p2", "ws-a", .idle, 3),
+        testSnapshotAgent("p3", "ws-b", .idle, 2),
+        testSnapshotAgent("p4", "ws-b", .idle, 1),
     };
     try store.applySnapshot(.{
         .version = "1",
@@ -566,6 +605,13 @@ test "buildRows: an agent going blocked pulls its workspace to first place" {
         .layouts = &.{},
         .agents = &agents,
     });
+
+    // Control: before blocking anything, ws-a (highest revision) is first.
+    {
+        const rows = try buildRows(testing.allocator, &store);
+        defer freeRows(testing.allocator, rows);
+        try testing.expectEqualStrings("ws-a", rows[1].title);
+    }
 
     var obj: std.json.ObjectMap = .empty;
     defer obj.deinit(testing.allocator);

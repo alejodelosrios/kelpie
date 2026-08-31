@@ -40,6 +40,11 @@ fn parseCommand(argv: []const []const u8) Command {
     if (argv.len == 0) return .activate;
 
     const subcmd = argv[0];
+    // `main.zig` already consumed `--demo-sidebar[=N]` into `demo_sidebar_n`
+    // before argv reaches here (real argv is forwarded to GIO so
+    // G_APPLICATION_HANDLES_COMMAND_LINE works) — it's not a subcommand, just
+    // a flag that arrived alongside a plain launch.
+    if (std.mem.startsWith(u8, subcmd, "--demo-sidebar")) return .activate;
     if (std.mem.eql(u8, subcmd, "focus")) {
         if (argv.len < 2) return .{ .malformed = "focus: missing <device>/<pane> argument\n" };
         const target = argv[1];
@@ -573,6 +578,16 @@ test "emptyStateText does not match locales that merely contain es, only a leadi
 test "parseCommand: empty argv returns activate" {
     const cmd = parseCommand(&.{});
     try std.testing.expectEqual(Command.activate, cmd);
+}
+
+test "parseCommand: --demo-sidebar (bare or with =N) activates instead of erroring as unknown" {
+    // Real bug this pins: with .handles_command_line = true, GIO forwards the
+    // full argv (including flags main.zig already consumed) to onCommandLine
+    // -> parseCommand. Before this fix, `--demo-sidebar` fell through to
+    // `.unknown`, so `kelpie --demo-sidebar` exited 1 instead of opening a
+    // window — the exact instrument criterios 1/2/5 need never ran.
+    try std.testing.expectEqual(Command.activate, parseCommand(&.{"--demo-sidebar"}));
+    try std.testing.expectEqual(Command.activate, parseCommand(&.{"--demo-sidebar=200"}));
 }
 
 test "parseCommand: focus with valid device/pane" {
