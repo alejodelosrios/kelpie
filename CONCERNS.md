@@ -172,3 +172,17 @@ Formato: `- [YYYY-MM-DD] #issue — qué se vio · por qué no se arregló ahora
   wiring va a construir de verdad con el `Dispatcher` real sobre `glib.MainContext` · dispara: el
   issue que conecte `Events.zig` a `app.zig` **debe correr esos dos escenarios contra herdr real
   antes de darse por cerrado**, no asumir que #10 ya los cubrió.
+- [2026-08-31] #12 — hallazgos menores de la segunda auditoría de `src/model/Store.zig`, ninguno
+  bloqueante: (a) `errdefer` de la key nueva en `workspace_created/updated/metadata_updated` y
+  `tab_created` se arma DESPUÉS de construir el literal (`WorkspaceKey{...}`/`TabKey{...}`), así que
+  un OOM en el segundo `gpa.dupe` de esa misma construcción deja huérfano el primero — fuga solo bajo
+  fallo de allocator, mismo patrón que el hallazgo de QA sobre `dupeWorkspaceInfo`/`dupeTabInfo`; (b)
+  esos mismos cuatro handlers duplican la key SIEMPRE y la descarban en el camino común (`fetchPut`
+  encuentra la entrada existente) — dos `alloc`/`free` de más por cada `workspace.updated`/
+  `tab.created` sobre una entrada ya vista; `getOrPut` evitaría la doble asignación de raíz; (c)
+  `pane_focused` verifica existencia con un recorrido O(n) del mapa de agentes cuando
+  `self.agents.getPtr(key)` (ya usado en `upsertAgent`/`pane_agent_status_changed`) resuelve lo mismo
+  en O(1) · no se corrigieron porque ninguno cambia comportamiento observable ni compromete memoria
+  en el camino normal, y el issue ya llevaba 4 rondas de Apply · dispara: si `Store.zig` vuelve a
+  tocarse (el consumidor de UI, o #34 con multi-dispositivo real), vale la pena aplicar los tres de
+  una vez en lugar de arrastrarlos.
