@@ -45,6 +45,21 @@ try list.append(gpa, 42);
   Tercera vez en este repo con la misma raíz: `Connection.open`, `openLive`, y `request()` (#8,
   corregido en `src/herdr/client.zig:218-222`).
 - `zig fmt --check build.zig build.zig.zon src` es parte del CI: formatea antes de commitear.
+- **`net.UnixAddress.connect` sobre un socket muerto NUNCA da `error.ConnectionRefused`**, aunque ese
+  error esté en el `ConnectError` declarado (`net.zig:891-906`): la implementación real de la ruta
+  AF_UNIX (`posixConnectUnix`, `Threaded.zig:11947-11987`) no tiene rama para `ECONNREFUSED` — cae en
+  el `else` genérico y sale como `error.Unexpected` (`posix.unexpectedErrno`, nunca panic:
+  `posix.zig:1669-1675`). Si necesitas distinguir "socket viejo sin listener" de "conectó", matchea
+  "cualquier error que no sea `FileNotFound`", nunca `error.ConnectionRefused` explícito — un
+  `socket_path` que apunta a un archivo que no es socket también da `ECONNREFUSED` (no `ENOTSOCK`:
+  ese errno es sobre el fd que llama, no sobre a qué apunta la ruta), así que cae en la misma rama.
+  Verificado en #11.
+- **`std.process.run`'s `RunOptions.timeout` default es `.none`** (`process.zig:485`) — sin
+  timeout explícito, `run()` espera para siempre a un hijo que nunca cierra sus pipes de
+  stdout/stderr. Para acotarlo: `.timeout = .{ .duration = .{ .raw = .fromSeconds(n), .clock =
+  .awake } }` (`Io.Timeout`/`Clock.Duration`, `Io.zig:1132-1138`/`:890-892`/`:986`); `error.Timeout`
+  cae en `RunError` y el `defer child.kill(io)` interno de `run` (`process.zig:508-510`) reapea al
+  hijo. Verificado en #11 (`src/herdr/LocalServer.zig`, `readHerdrStatus`).
 
 ## ghostty-vt como módulo Zig
 

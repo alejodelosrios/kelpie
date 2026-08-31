@@ -89,4 +89,15 @@ pub fn build(b: *std.Build) void {
     });
     const theme_css_tests = b.addTest(.{ .root_module = theme_css_mod });
     test_step.dependOn(&b.addRunArtifact(theme_css_tests).step);
+
+    // LocalServer (#11): no lo importa nadie todavía (su consumidor es #17), así que
+    // sin esto zig build test nunca compila ni corre sus tests. Mismo patrón que
+    // theme_css_mod — módulo propio, sin dependencias más allá de std.
+    const local_server_mod = b.createModule(.{
+        .root_source_file = b.path("src/herdr/LocalServer.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const local_server_tests = b.addTest(.{ .root_module = local_server_mod });
+    test_step.dependOn(&b.addRunArtifact(local_server_tests).step);
 }
