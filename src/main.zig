@@ -101,4 +101,7 @@ test "version is valid semver" {
 test {
     _ = herdr_probe;
     _ = app_shell;
+    // Store (#12) ya no tiene módulo de test propio: su consumidor real (el
+    // sidebar de #16) vive en el exe, así que sus tests corren aquí.
+    _ = @import("model/Store.zig");
 }

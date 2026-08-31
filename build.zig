@@ -111,20 +111,4 @@ pub fn build(b: *std.Build) void {
     });
     const events_tests = b.addTest(.{ .root_module = events_mod });
     test_step.dependOn(&b.addRunArtifact(events_tests).step);
-
-    // Store (#12): no lo importa nadie todavía (su consumidor es un issue de UI
-    // posterior), así que sin esto zig build test nunca compila ni corre sus tests.
-    // Mismo patrón que events_mod — módulo propio, sin dependencias más allá de std.
-    const store_mod = b.createModule(.{
-        .root_source_file = b.path("src/model/Store.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    store_mod.addImport("types", b.createModule(.{
-        .root_source_file = b.path("src/herdr/types.zig"),
-        .target = target,
-        .optimize = optimize,
-    }));
-    const store_tests = b.addTest(.{ .root_module = store_mod });
-    test_step.dependOn(&b.addRunArtifact(store_tests).step);
 }
