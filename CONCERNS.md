@@ -258,3 +258,23 @@ Formato: `- [YYYY-MM-DD] #issue — qué se vio · por qué no se arregló ahora
   quien vea este test rojo en CI **no lo relanza**: aísla el estado residual (ruta del socket por corrida,
   limpieza en el `defer`) antes de tocar nada más, y quien vuelva a `LocalServer.zig` por cualquier motivo
   (#81 es el siguiente candidato, que lo usará de verdad) lo arregla de paso.
+
+- **2026-08-31 · #12 (hallado auditando #16) · `pane_agent_status_changed` borra `agent`, `display_agent`
+  y `title` del agente.** `Store.zig:287-289` llama `updateOptionalField` con lo que traiga el evento, y
+  `updateOptionalField` (`Store.zig:700-704`) duplica `null`, libera lo que había y deja el campo en `null`
+  **sin condición**. Un evento de cambio de estado que solo traiga el status borra los tres campos.
+  Observado en vivo por el auditor con el binario instrumentado: la fila pasó de `claude` a `pane-0` justo
+  al bloquearse, porque `displayTitle` cae al `pane_id` · **por qué importa**: hoy no se nota porque nada
+  cablea eventos reales, pero con #81 cada cambio de estado degradará el título de la fila que el usuario
+  está mirando — y lo hará justo en el momento de máxima atención, al bloquearse · dispara: **#81, antes de
+  cablear eventos reales**. Distinguir "el evento no trae el campo" de "el evento lo pone a null" es el
+  arreglo; hoy el tipo no permite distinguirlos.
+
+- **2026-08-31 · #16 · el escenario Gherkin 7 está escrito como si pasara, y no pasa.** El diseño dice
+  «`focusAgent` recibe `("local","pane-3")`» al activar una fila, pero el click sale por
+  `onSidebarActivated` (`src/ui/app_shell.zig:317-319`), que solo loguea. Las dos direcciones son distintas
+  y el comportamiento es correcto —`focusAgent` es la entrada externa de `kelpie focus` (#17) y sí
+  selecciona— pero el escenario quedó redactado sobre una costura que no es la que se ejerce · **por qué
+  importa**: un Gherkin que describe una llamada que nadie hace es un criterio que se da por cumplido
+  leyéndolo · dispara: **#19 (attach)**, que es quien conecta esa costura de verdad — al hacerlo, reescribe
+  el escenario 7 en términos de lo que realmente ocurre y lo cubre con test.
