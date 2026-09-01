@@ -267,6 +267,9 @@ test "GlibDispatcher: Box is heap-allocated (not stack)" {
         if (result) |_| {
             // If it didn't fail, the Box wasn't allocated on this
             // fail_index — that's fine, try the next one.
+            // Drain the idle source so the Box gets freed (testing.allocator
+            // would report a leak otherwise).
+            pumpUntilDrained();
         } else |err| {
             try testing.expectEqual(error.OutOfMemory, err);
         }
@@ -316,6 +319,15 @@ test "trampoline: destroys the Box (no leak under testing.allocator)" {
 
 fn testTask(_: *anyopaque) void {}
 
+/// Drain all pending idle sources from the default GLib main context.
+/// Must be called after every `invoke` in tests: with `idleAddOnce` the
+/// Box is freed when the main loop dispatches the source, not when
+/// `invoke` returns.  `may_block = 0` so we never hang on an empty
+/// context — we just dispatch whatever is already ready.
+fn pumpUntilDrained() void {
+    while (glib.MainContext.iteration(null, 0) != 0) {}
+}
+
 test "GlibDispatcher: task runs on the main-context thread, not the caller" {
     // Proves the dispatcher actually hands off to the GLib main context:
     // the task must run on whichever thread pumps the main context (here,
@@ -349,11 +361,18 @@ test "GlibDispatcher: task runs on the main-context thread, not the caller" {
 
     worker.join();
 
-    // Pump the GLib main context until the task fires (or 50 iterations).
-    var i: u32 = 0;
-    while (!task_ran and i < 50) : (i += 1) {
-        _ = glib.MainContext.iteration(null, 1);
+    // Pump the GLib main context until the task fires. Acotado a propósito:
+    // sin límite, una fuente que no llegue a dispararse convierte este test en
+    // un CUELGUE, y un cuelgue en CI es peor que un rojo — no dice qué falló y
+    // se come el job entero hasta el timeout del runner.
+    var spins: u32 = 0;
+    while (!task_ran and spins < 10_000) : (spins += 1) {
+        _ = glib.MainContext.iteration(null, 0);
     }
+
+    // Drain any remaining sources so the Box gets freed (testing.allocator
+    // would report a leak otherwise).
+    pumpUntilDrained();
     try testing.expect(task_ran);
 
     // The task must have run on the test thread (main context owner),
