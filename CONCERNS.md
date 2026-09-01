@@ -334,3 +334,12 @@ Formato: `- [YYYY-MM-DD] #issue — qué se vio · por qué no se arregló ahora
   en verde sobre una app rota · dispara: quien vaya a tocar `Link` o `EventsClient` — un servidor falso
   que acepte N conexiones y responda a lo que le llegue, en vez de un guion fijo, desbloquea los tres
   tests de golpe.
+
+- **2026-09-01 · #81 · un agente que nace con kelpie ya conectado no aparece hasta el siguiente
+  resync.** Los eventos de pane dejaron de crear agentes (`Store.zig`, `upsertAgent`) porque su
+  payload no trae identidad —ni `agent`, ni `title`, ni `cwd`—, así que crear desde ellos producía
+  filas con el `pane_id` pelado. `pane.agent_detected` tampoco sirve: su payload es `pane_id` +
+  `workspace_id` y nada más (verificado sobre el socket) · **por qué importa**: abrir un agente
+  nuevo y no verlo aparecer es visible y desconcierta · dispara: **#84**, cuyo mecanismo de resync
+  con rebote lo cierra de paso — al llegar cualquier evento se pide snapshot, y el snapshot sí trae
+  la identidad. Si #84 se implementa como está descrito, esta fila se cierra con él; verificarlo.
