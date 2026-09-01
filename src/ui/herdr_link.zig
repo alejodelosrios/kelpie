@@ -418,3 +418,66 @@ test "resolveSocketPath: el slice devuelto vive DENTRO del buffer (contrato de a
     const got2 = @intFromPtr(outside.ptr);
     try testing.expect(got2 < base or got2 >= base + buf.len);
 }
+
+// RESTAURADO. Este test existía en `69c9240` y desapareció en `728c352`: el
+// hunk que quitaba los dos tests de QA que colgaban la suite se llevó por
+// delante el de al lado. Nadie lo notó porque Zig no se queja de una función
+// privada sin usar, así que `pumpUntilDrained` quedó huérfano y la suite verde.
+// Lo cazó el auditor en la segunda pasada.
+//
+// Es el único test del escenario Gherkin 6 —"ninguna mutación del Store ocurre
+// en el hilo lector"—, o sea la garantía por la que existe este issue, y el
+// único que distingue un dispatcher asíncrono de uno síncrono: sin él, alguien
+// vuelve a `MainContext.invoke` y la suite sigue en verde.
+test "GlibDispatcher: task runs on the main-context thread, not the caller" {
+    // Proves the dispatcher actually hands off to the GLib main context:
+    // the task must run on whichever thread pumps the main context (here,
+    // the test thread), not on the thread that called `invoke`.
+    //
+    // A synchronous dispatcher that calls the task inline would make the
+    // task run on the worker thread — the exact bug this test guards
+    // against.  `std.Thread.getCurrentId()` is the discrimination tool.
+    var gd = GlibDispatcher{ .gpa = testing.allocator };
+
+    var task_ran = false;
+    var task_thread_id: std.Thread.Id = undefined;
+
+    const Capture = struct {
+        ran: *bool,
+        thread_id: *std.Thread.Id,
+    };
+    var capture = Capture{ .ran = &task_ran, .thread_id = &task_thread_id };
+
+    const worker = try std.Thread.spawn(.{}, struct {
+        fn invokeTask(dispatcher: *GlibDispatcher, cap: *Capture) void {
+            dispatcher.dispatcher().invoke(struct {
+                fn run(raw: *anyopaque) void {
+                    const c: *Capture = @ptrCast(@alignCast(raw));
+                    c.thread_id.* = std.Thread.getCurrentId();
+                    c.ran.* = true;
+                }
+            }.run, cap) catch {};
+        }
+    }.invokeTask, .{ &gd, &capture });
+
+    worker.join();
+
+    // Pump the GLib main context until the task fires. Acotado a propósito:
+    // sin límite, una fuente que no llegue a dispararse convierte este test en
+    // un CUELGUE, y un cuelgue en CI es peor que un rojo — no dice qué falló y
+    // se come el job entero hasta el timeout del runner.
+    var spins: u32 = 0;
+    while (!task_ran and spins < 10_000) : (spins += 1) {
+        _ = glib.MainContext.iteration(null, 0);
+    }
+
+    // Drain any remaining sources so the Box gets freed (testing.allocator
+    // would report a leak otherwise).
+    pumpUntilDrained();
+    try testing.expect(task_ran);
+
+    // The task must have run on the test thread (main context owner),
+    // NOT on the worker thread that called invoke.
+    const test_thread_id = std.Thread.getCurrentId();
+    try testing.expectEqual(test_thread_id, task_thread_id);
+}
