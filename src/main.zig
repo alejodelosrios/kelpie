@@ -4,6 +4,7 @@ const herdr_probe = @import("herdr/probe.zig");
 const spike_b = @import("ui/spike_b.zig");
 const app_shell = @import("ui/app_shell.zig");
 const sidebar = @import("ui/sidebar.zig");
+const herdr_link = @import("ui/herdr_link.zig");
 
 pub const name = "kelpie";
 // ponytail: duplicated from build.zig.zon on purpose; wire a build option when the version is set by CI.
@@ -109,6 +110,7 @@ test {
     _ = herdr_probe;
     _ = app_shell;
     _ = sidebar;
+    _ = herdr_link;
     // Store (#12) ya no tiene módulo de test propio: su consumidor real (el
     // sidebar de #16) vive en el exe, así que sus tests corren aquí.
     _ = @import("model/Store.zig");

@@ -246,7 +246,7 @@ pub const Store = struct {
                 );
                 defer parsed.deinit();
                 const pane = parsed.value.pane;
-                try upsertAgent(self, pane, true);
+                try upsertAgent(self, pane);
             },
 
             .pane_closed => {
@@ -615,12 +615,32 @@ const TabFocusedPayload = struct {
 // Internal helpers
 // ---------------------------------------------------------------------------
 
-fn upsertAgent(self: *Store, pane: types.PaneInfo, allow_create: bool) !void {
+fn upsertAgent(self: *Store, pane: types.PaneInfo) !void {
     const key = AgentKey{
         .device_id = "local",
         .pane_id = pane.pane_id,
     };
     if (self.agents.getPtr(key)) |existing| {
+        // Al suscribirse, herdr reproduce el historial de cada pane desde
+        // `revision = 1`, y esa ráfaga llega DESPUÉS del `session.snapshot`.
+        // Medido contra la sesión real, degradaba lo bueno a nada:
+        //     wA:p5  working rev=11  ->  unknown rev=1
+        //
+        // La guarda ataca ESO y solo eso: un agente que ya conocemos no vuelve
+        // a `unknown` por un evento de pane. `unknown` es "este pane no aloja
+        // un agente", y un pane que ya demostró alojar uno no deja de hacerlo
+        // porque llegue una trama vieja.
+        //
+        // Lo que NO se hace es comparar `revision`: se probó y rompió las
+        // actualizaciones en vivo, porque `agent_status` cambia SIN que
+        // `revision` suba —herdr lleva `state_change_seq` aparte y el payload
+        // de `pane.updated` no lo incluye—. Descartar por revisión descartaba
+        // justo los cambios de estado, que es lo único que este issue existe
+        // para transmitir.
+        const incoming_status = if (pane.agent_status == .unknown and existing.status != .unknown)
+            existing.status
+        else
+            pane.agent_status;
         const from_status = existing.status;
         const duped_ws = try self.gpa.dupe(u8, pane.workspace_id);
         self.gpa.free(existing.workspace_id);
@@ -628,30 +648,25 @@ fn upsertAgent(self: *Store, pane: types.PaneInfo, allow_create: bool) !void {
         const duped_tab = try self.gpa.dupe(u8, pane.tab_id);
         self.gpa.free(existing.tab_id);
         existing.tab_id = duped_tab;
-        existing.status = pane.agent_status;
+        existing.status = incoming_status;
         existing.revision = pane.revision;
         existing.focused = pane.focused;
-        if (from_status != pane.agent_status) {
-            fireTransition(&self.observers, existing, from_status, pane.agent_status);
+        if (from_status != incoming_status) {
+            fireTransition(&self.observers, existing, from_status, incoming_status);
         }
         fireChanged(&self.observers);
-    } else if (allow_create) {
-        const duped_key = AgentKey{
-            .device_id = try self.gpa.dupe(u8, "local"),
-            .pane_id = try self.gpa.dupe(u8, pane.pane_id),
-        };
-        const agent = Agent{
-            .device_id = duped_key.device_id,
-            .pane_id = duped_key.pane_id,
-            .workspace_id = try self.gpa.dupe(u8, pane.workspace_id),
-            .tab_id = try self.gpa.dupe(u8, pane.tab_id),
-            .status = pane.agent_status,
-            .revision = pane.revision,
-            .focused = pane.focused,
-        };
-        try self.agents.put(duped_key, agent);
-        fireChanged(&self.observers);
     }
+    // Antes había aquí una rama que CREABA el agente desde un evento de pane.
+    // Se quitó: el payload de `pane.created`/`pane.updated` no trae `agent`,
+    // ni `title`, ni `cwd` —comprobado contra la sesión real—, así que lo que
+    // creaba eran filas con el `pane_id` pelado y sin subtítulo. Y `resync`
+    // ahora falla el ciclo si no consigue snapshot, así que la identidad de un
+    // agente viene SIEMPRE de `applySnapshot`, que es lo único que la tiene.
+    //
+    // Consecuencia declarada: un agente que nace estando kelpie conectado no
+    // aparece hasta el siguiente resync. `pane.agent_detected` sería la señal
+    // para pedirlo, pero su payload solo trae `pane_id`/`workspace_id`, así que
+    // exige una costura que pida un resync bajo demanda — va a CONCERNS.md.
 }
 
 fn urgencyRank(status: types.AgentStatus) u8 {
@@ -698,7 +713,12 @@ fn freeOptional(gpa: std.mem.Allocator, val: ?[]const u8) void {
 }
 
 fn updateOptionalField(gpa: std.mem.Allocator, field: *?[]const u8, new_val: ?[]const u8) !void {
-    const duped = try dupeOptional(gpa, new_val);
+    // `null` means "the event does not carry this field", not "set it to
+    // null".  Real deletion arrives via `applySnapshot`, which replaces the
+    // whole agent.  Skipping avoids a `pane_agent_status_changed` that only
+    // carries `agent_status` from wiping `agent`/`display_agent`/`title`.
+    const val = new_val orelse return;
+    const duped = try gpa.dupe(u8, val);
     freeOptional(gpa, field.*);
     field.* = duped;
 }
@@ -903,7 +923,7 @@ test "transition reorders and notifies exactly once" {
     try testing.expectEqualStrings("p1", ordered.items[0].pane_id);
 }
 
-test "pane_closed removes agent; pane_updated for unknown pane creates one" {
+test "pane_closed removes agent; pane_updated for unknown pane NO crea uno" {
     var store = Store.init(testing.allocator);
     defer store.deinit();
 
@@ -922,7 +942,10 @@ test "pane_closed removes agent; pane_updated for unknown pane creates one" {
     defer ordered1.deinit();
     try testing.expectEqual(@as(usize, 0), ordered1.items.len);
 
-    // pane_updated for unknown p9 — creates it
+    // `pane_updated` de un pane desconocido NO crea nada: el payload no trae
+    // ni `agent`, ni `title`, ni `cwd`, así que crearlo produciría una fila con
+    // el `pane_id` pelado — el defecto que apareció al matar y relevantar el
+    // servidor en el gate de integración. La identidad viene del snapshot.
     const update_json =
         \\{"pane":{"pane_id":"p9","terminal_id":"t2","workspace_id":"w1","tab_id":"tab1","focused":false,"agent_status":"working","revision":5}}
     ;
@@ -932,9 +955,7 @@ test "pane_closed removes agent; pane_updated for unknown pane creates one" {
 
     var ordered2 = try store.orderedAgents(testing.allocator);
     defer ordered2.deinit();
-    try testing.expectEqual(@as(usize, 1), ordered2.items.len);
-    try testing.expectEqualStrings("p9", ordered2.items[0].pane_id);
-    try testing.expectEqual(types.AgentStatus.working, ordered2.items[0].status);
+    try testing.expectEqual(@as(usize, 0), ordered2.items.len);
 }
 
 test "unknown agent_status goes to .unknown and sorts last" {
@@ -1072,12 +1093,14 @@ test "no leaks: applySnapshot -> applyEvent -> deinit under testing.allocator" {
     defer ev5.deinit();
     try store.applyEvent(.{ .event = .tab_focused, .data = ev5.value });
 
-    // Final state: 2 agents (p1 blocked, p3 done)
+    // Estado final: 1 agente. `p1` sigue (el snapshot lo trajo) y pasó a
+    // blocked; `p2` se cerró; y `p3` NO entra, porque un evento de pane ya no
+    // crea agentes — no trae su identidad.
     var ordered = try store.orderedAgents(testing.allocator);
     defer ordered.deinit();
-    try testing.expectEqual(@as(usize, 2), ordered.items.len);
+    try testing.expectEqual(@as(usize, 1), ordered.items.len);
     try testing.expectEqual(types.AgentStatus.blocked, ordered.items[0].status);
-    try testing.expectEqual(types.AgentStatus.done, ordered.items[1].status);
+    try testing.expectEqualStrings("p1", ordered.items[0].pane_id);
 
     // Workspace renamed
     var ws_it = store.workspaces.iterator();
@@ -1240,4 +1263,110 @@ test "pane_focused for unknown pane_id is a no-op (does not clear other agents' 
     // p1 must still be focused — the unknown pane must not have cleared it.
     const key = AgentKey{ .device_id = "local", .pane_id = "p1" };
     try testing.expect(store.agents.get(key).?.focused);
+}
+
+test "pane_agent_status_changed without title preserves existing title" {
+    var store = Store.init(testing.allocator);
+    defer store.deinit();
+
+    // Seed an agent whose displayTitle resolves via .title ("claude").
+    const agents = [_]types.AgentInfo{.{
+        .terminal_id = "t1",
+        .agent_status = .working,
+        .workspace_id = "w1",
+        .tab_id = "tab1",
+        .pane_id = "p1",
+        .focused = false,
+        .revision = 1,
+        .agent = "claude",
+        .title = "claude",
+    }};
+    try store.applySnapshot(makeSnapshot(&agents, &.{}, &.{}));
+
+    const key = AgentKey{ .device_id = "local", .pane_id = "p1" };
+    try testing.expectEqualStrings("claude", store.agents.get(key).?.displayTitle());
+
+    // pane_agent_status_changed that only carries status — no title, no agent,
+    // no display_agent.  Before the fix this would null out all three and
+    // displayTitle() would fall back to pane_id ("p1").
+    const event_json =
+        \\{"pane_id":"p1","workspace_id":"w1","agent_status":"blocked"}
+    ;
+    const parsed = try json.parseFromSlice(json.Value, testing.allocator, event_json, .{});
+    defer parsed.deinit();
+    try store.applyEvent(.{ .event = .pane_agent_status_changed, .data = parsed.value });
+
+    // Title must survive.
+    try testing.expectEqualStrings("claude", store.agents.get(key).?.displayTitle());
+    try testing.expectEqualStrings("claude", store.agents.get(key).?.title.?);
+    // Status did change.
+    try testing.expectEqual(types.AgentStatus.blocked, store.agents.get(key).?.status);
+}
+
+test "ningun evento de pane crea un agente: la identidad viene del snapshot" {
+    var store = Store.init(testing.allocator);
+    defer store.deinit();
+
+    // Un pane normal (una shell): herdr lo manda con agent_status "unknown" y
+    // sin campo `agent`. Antes de la guarda esto creaba una fila fantasma.
+    const shell_json =
+        \\{"pane":{"pane_id":"w3:p3","terminal_id":"t3","workspace_id":"w3","tab_id":"w3:t4","focused":false,"agent_status":"unknown","revision":1}}
+    ;
+    const shell = try json.parseFromSlice(json.Value, testing.allocator, shell_json, .{});
+    defer shell.deinit();
+    try store.applyEvent(.{ .event = .pane_created, .data = shell.value });
+    try testing.expectEqual(@as(usize, 0), store.agents.count());
+
+    // Y tampoco uno que sí hospeda un agente: el evento no trae su identidad.
+    // Aparecerá cuando llegue el snapshot, que es quien la tiene.
+    const agent_json =
+        \\{"pane":{"pane_id":"w5:p1","terminal_id":"t1","workspace_id":"w5","tab_id":"w5:t1","focused":false,"agent_status":"idle","revision":1}}
+    ;
+    const ag = try json.parseFromSlice(json.Value, testing.allocator, agent_json, .{});
+    defer ag.deinit();
+    try store.applyEvent(.{ .event = .pane_created, .data = ag.value });
+    try testing.expectEqual(@as(usize, 0), store.agents.count());
+}
+
+test "el replay no degrada a unknown, pero un cambio de estado real SI se aplica" {
+    var store = Store.init(testing.allocator);
+    defer store.deinit();
+
+    const agents = [_]types.AgentInfo{.{
+        .terminal_id = "t1",
+        .agent_status = .working,
+        .workspace_id = "wA",
+        .tab_id = "wA:t3",
+        .pane_id = "wA:p5",
+        .focused = false,
+        .revision = 11,
+    }};
+    try store.applySnapshot(makeSnapshot(&agents, &.{}, &.{}));
+    const key = AgentKey{ .device_id = "local", .pane_id = "wA:p5" };
+    try testing.expectEqual(types.AgentStatus.working, store.agents.get(key).?.status);
+
+    // 1) El replay del historial llega con `unknown` y revisión vieja. Un pane
+    //    que ya demostró alojar un agente no deja de alojarlo por una trama
+    //    vieja: el estado se conserva.
+    const replay =
+        \\{"pane":{"pane_id":"wA:p5","terminal_id":"t1","workspace_id":"wA","tab_id":"wA:t3","focused":false,"agent_status":"unknown","revision":1}}
+    ;
+    const old_ev = try json.parseFromSlice(json.Value, testing.allocator, replay, .{});
+    defer old_ev.deinit();
+    try store.applyEvent(.{ .event = .pane_updated, .data = old_ev.value });
+    try testing.expectEqual(types.AgentStatus.working, store.agents.get(key).?.status);
+
+    // 2) Y la otra mitad, que es la que importa para el criterio 3: un cambio
+    //    de estado real SÍ se aplica **aunque la revisión no suba**. herdr
+    //    cambia `agent_status` sin tocar `revision` (lleva `state_change_seq`
+    //    aparte, que el payload de `pane.updated` no incluye), así que
+    //    descartar por revisión congelaba el sidebar — se probó y rompió las
+    //    actualizaciones en vivo.
+    const change =
+        \\{"pane":{"pane_id":"wA:p5","terminal_id":"t1","workspace_id":"wA","tab_id":"wA:t3","focused":false,"agent_status":"blocked","revision":11}}
+    ;
+    const ev = try json.parseFromSlice(json.Value, testing.allocator, change, .{});
+    defer ev.deinit();
+    try store.applyEvent(.{ .event = .pane_updated, .data = ev.value });
+    try testing.expectEqual(types.AgentStatus.blocked, store.agents.get(key).?.status);
 }

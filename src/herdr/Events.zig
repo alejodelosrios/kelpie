@@ -8,15 +8,19 @@ const types = @import("types.zig");
 
 /// Callback delivery seam: `EventsClient`'s reader thread never calls
 /// `on_event`/`on_resynced` directly — it always goes through
-/// `Dispatcher.invoke`. Production wraps `glib.MainContext.invoke`; that
-/// binding lives in a future UI issue (this file stays gobject-free, per
-/// roadmap/designs/10-eventos-reconexion.md's dispatcher decision).
+/// `Dispatcher.invoke`. Production wraps `glib.idleAddOnce`
+/// (lives in `src/ui/herdr_link.zig`) — **no** `MainContext.invoke`, que
+/// ejecuta la tarea EN LÍNEA cuando el hilo que llama puede adquirir el
+/// contexto; una fuente idle siempre se encola y la drena la loop. Ese binding
+/// empaqueta dos punteros
+/// (`task` + `task_ctx`) into the single `user_data` GLib accepts, which
+/// requires a heap allocation that can fail — hence `!void`.
 pub const Dispatcher = struct {
     ptr: *anyopaque,
-    invokeFn: *const fn (ptr: *anyopaque, task: *const fn (ctx: *anyopaque) void, task_ctx: *anyopaque) void,
+    invokeFn: *const fn (ptr: *anyopaque, task: *const fn (ctx: *anyopaque) void, task_ctx: *anyopaque) anyerror!void,
 
-    pub fn invoke(self: Dispatcher, task: *const fn (ctx: *anyopaque) void, task_ctx: *anyopaque) void {
-        self.invokeFn(self.ptr, task, task_ctx);
+    pub fn invoke(self: Dispatcher, task: *const fn (ctx: *anyopaque) void, task_ctx: *anyopaque) !void {
+        return self.invokeFn(self.ptr, task, task_ctx);
     }
 };
 
@@ -151,7 +155,15 @@ pub const EventsClient = struct {
         // happens for the rest of this cycle.
         backoff_ms.* = backoff_start_ms;
 
-        self.resync();
+        // `try`, no fire-and-forget: sin snapshot la conexión NO sirve. El
+        // snapshot es la única fuente de la identidad de un agente (título,
+        // agente, cwd); los eventos de pane solo traen estado. Si `resync`
+        // falla y seguimos leyendo, el store se queda poblado solo por el
+        // replay de `pane.created`, que produce filas con el `pane_id` pelado
+        // — exactamente lo que apareció al matar y relevantar el servidor en el
+        // gate de integración. Fallar aquí devuelve el control a `run()`, que
+        // reintenta el ciclo completo con backoff.
+        try self.resync();
 
         while (true) {
             const line = try takeLine(&conn.reader.interface);
@@ -162,20 +174,20 @@ pub const EventsClient = struct {
         }
     }
 
-    fn resync(self: *EventsClient) void {
+    fn resync(self: *EventsClient) !void {
         var rpc_err: ?client.RpcError = null;
         const resp = client.request(self.gpa, self.io, self.socket_path, "session.snapshot", .{}, client.default_read_timeout_ms, &rpc_err) catch |err| {
             if (err == error.HerdrRpc) rpc_err.?.deinit(self.gpa);
-            return;
+            return err;
         };
         defer resp.deinit();
-        if (resp.value != .object) return;
+        if (resp.value != .object) return error.UnexpectedResponse;
 
-        const result = resp.value.object.get("result") orelse return;
-        if (result != .object) return;
-        const snapshot_value = result.object.get("snapshot") orelse return;
+        const result = resp.value.object.get("result") orelse return error.UnexpectedResponse;
+        if (result != .object) return error.UnexpectedResponse;
+        const snapshot_value = result.object.get("snapshot") orelse return error.UnexpectedResponse;
 
-        const parsed_snapshot = json.parseFromValue(types.SessionSnapshot, self.gpa, snapshot_value, .{ .ignore_unknown_fields = true }) catch return;
+        const parsed_snapshot = json.parseFromValue(types.SessionSnapshot, self.gpa, snapshot_value, .{ .ignore_unknown_fields = true }) catch |err| return err;
         errdefer parsed_snapshot.deinit();
 
         // Heap-allocated, not a stack local: `Dispatcher.invoke` isn't
@@ -183,12 +195,16 @@ pub const EventsClient = struct {
         // which can queue and return before the task runs) — the trampoline
         // frees both the parsed snapshot and this ctx once it's actually
         // done with them.
-        const ctx = self.gpa.create(ResyncCtx) catch {
+        const ctx = self.gpa.create(ResyncCtx) catch |err| {
             parsed_snapshot.deinit();
-            return;
+            return err;
         };
         ctx.* = .{ .client = self, .parsed = parsed_snapshot };
-        self.dispatcher.invoke(resyncTrampoline, ctx);
+        self.dispatcher.invoke(resyncTrampoline, ctx) catch |err| {
+            parsed_snapshot.deinit();
+            self.gpa.destroy(ctx);
+            return err;
+        };
     }
 
     fn deliverEvent(self: *EventsClient, line: []const u8) !void {
@@ -198,7 +214,14 @@ pub const EventsClient = struct {
         // Same heap-ownership-transfer reasoning as `resync()` above.
         const ctx = try self.gpa.create(EventCtx);
         ctx.* = .{ .client = self, .parsed = parsed };
-        self.dispatcher.invoke(eventTrampoline, ctx);
+        self.dispatcher.invoke(eventTrampoline, ctx) catch |err| {
+            // errdefer frees `parsed`; we only need to destroy the ctx.
+            // Se propaga el error REAL del dispatcher, no un `OutOfMemory`
+            // fijo: hoy el único que puede llegar es ese, pero devolver una
+            // constante convierte un diagnóstico futuro en una mentira.
+            self.gpa.destroy(ctx);
+            return err;
+        };
     }
 };
 
@@ -350,10 +373,10 @@ const ThreadIdDispatcher = struct {
         task_ctx: *anyopaque,
     };
 
-    fn invokeImpl(ptr: *anyopaque, task: *const fn (ctx: *anyopaque) void, task_ctx: *anyopaque) void {
+    fn invokeImpl(ptr: *anyopaque, task: *const fn (ctx: *anyopaque) void, task_ctx: *anyopaque) anyerror!void {
         const self: *@This() = @ptrCast(@alignCast(ptr));
         const args = Args{ .self = self, .caller_id = std.Thread.getCurrentId(), .task = task, .task_ctx = task_ctx };
-        const t = std.Thread.spawn(.{}, runTask, .{args}) catch return;
+        const t = try std.Thread.spawn(.{}, runTask, .{args});
         t.join();
     }
 
@@ -382,7 +405,7 @@ const QueueingDispatcher = struct {
         return .{ .ptr = self, .invokeFn = invokeImpl };
     }
 
-    fn invokeImpl(ptr: *anyopaque, task: *const fn (ctx: *anyopaque) void, task_ctx: *anyopaque) void {
+    fn invokeImpl(ptr: *anyopaque, task: *const fn (ctx: *anyopaque) void, task_ctx: *anyopaque) anyerror!void {
         const self: *@This() = @ptrCast(@alignCast(ptr));
         const i = self.len.fetchAdd(1, .acq_rel);
         if (i < self.queue.len) self.queue[i] = .{ .task = task, .ctx = task_ctx };
