@@ -621,22 +621,26 @@ fn upsertAgent(self: *Store, pane: types.PaneInfo) !void {
         .pane_id = pane.pane_id,
     };
     if (self.agents.getPtr(key)) |existing| {
-        // Al suscribirse, herdr REPRODUCE el historial de cada pane desde
-        // `revision = 1`, y esa ráfaga llega DESPUÉS del `session.snapshot` que
-        // `resync()` acaba de pedir. Sin esta guarda, el replay pisa estado nuevo
-        // con estado viejo: medido contra la sesión real,
+        // Al suscribirse, herdr reproduce el historial de cada pane desde
+        // `revision = 1`, y esa ráfaga llega DESPUÉS del `session.snapshot`.
+        // Medido contra la sesión real, degradaba lo bueno a nada:
         //     wA:p5  working rev=11  ->  unknown rev=1
-        //     w5:p1  idle    rev=4   ->  unknown rev=1
-        // y el sidebar acababa mostrando el spinner apagado en un agente que sí
-        // trabajaba, y glifo de bloqueado en agentes que estaban en reposo.
-        // Se descarta lo que NO sea estrictamente más nuevo, y el `<=` no es
-        // exceso de celo: el replay llega hasta la MISMA revisión que el
-        // snapshot con un estado distinto —medido: `w5:p1 blocked rev=4` contra
-        // `idle rev=4` del snapshot—, porque `agent_status` puede cambiar sin
-        // que suba `revision` (herdr lleva `state_change_seq` aparte, y el
-        // payload de `pane.updated` no lo incluye). A revisión igual el snapshot
-        // es la fuente buena; a revisión mayor, el evento.
-        if (pane.revision <= existing.revision) return;
+        //
+        // La guarda ataca ESO y solo eso: un agente que ya conocemos no vuelve
+        // a `unknown` por un evento de pane. `unknown` es "este pane no aloja
+        // un agente", y un pane que ya demostró alojar uno no deja de hacerlo
+        // porque llegue una trama vieja.
+        //
+        // Lo que NO se hace es comparar `revision`: se probó y rompió las
+        // actualizaciones en vivo, porque `agent_status` cambia SIN que
+        // `revision` suba —herdr lleva `state_change_seq` aparte y el payload
+        // de `pane.updated` no lo incluye—. Descartar por revisión descartaba
+        // justo los cambios de estado, que es lo único que este issue existe
+        // para transmitir.
+        const incoming_status = if (pane.agent_status == .unknown and existing.status != .unknown)
+            existing.status
+        else
+            pane.agent_status;
         const from_status = existing.status;
         const duped_ws = try self.gpa.dupe(u8, pane.workspace_id);
         self.gpa.free(existing.workspace_id);
@@ -644,11 +648,11 @@ fn upsertAgent(self: *Store, pane: types.PaneInfo) !void {
         const duped_tab = try self.gpa.dupe(u8, pane.tab_id);
         self.gpa.free(existing.tab_id);
         existing.tab_id = duped_tab;
-        existing.status = pane.agent_status;
+        existing.status = incoming_status;
         existing.revision = pane.revision;
         existing.focused = pane.focused;
-        if (from_status != pane.agent_status) {
-            fireTransition(&self.observers, existing, from_status, pane.agent_status);
+        if (from_status != incoming_status) {
+            fireTransition(&self.observers, existing, from_status, incoming_status);
         }
         fireChanged(&self.observers);
     }
@@ -1324,11 +1328,10 @@ test "ningun evento de pane crea un agente: la identidad viene del snapshot" {
     try testing.expectEqual(@as(usize, 0), store.agents.count());
 }
 
-test "una actualizacion de pane mas vieja que la guardada no pisa el estado nuevo" {
+test "el replay no degrada a unknown, pero un cambio de estado real SI se aplica" {
     var store = Store.init(testing.allocator);
     defer store.deinit();
 
-    // Snapshot: el agente esta trabajando, revision 11.
     const agents = [_]types.AgentInfo{.{
         .terminal_id = "t1",
         .agent_status = .working,
@@ -1339,29 +1342,31 @@ test "una actualizacion de pane mas vieja que la guardada no pisa el estado nuev
         .revision = 11,
     }};
     try store.applySnapshot(makeSnapshot(&agents, &.{}, &.{}));
-
     const key = AgentKey{ .device_id = "local", .pane_id = "wA:p5" };
     try testing.expectEqual(types.AgentStatus.working, store.agents.get(key).?.status);
 
-    // Llega el replay del historial: revision 1, estado desconocido. Es MAS
-    // VIEJO que lo que ya tenemos, asi que no debe tocar nada.
+    // 1) El replay del historial llega con `unknown` y revisión vieja. Un pane
+    //    que ya demostró alojar un agente no deja de alojarlo por una trama
+    //    vieja: el estado se conserva.
     const replay =
         \\{"pane":{"pane_id":"wA:p5","terminal_id":"t1","workspace_id":"wA","tab_id":"wA:t3","focused":false,"agent_status":"unknown","revision":1}}
     ;
     const old_ev = try json.parseFromSlice(json.Value, testing.allocator, replay, .{});
     defer old_ev.deinit();
     try store.applyEvent(.{ .event = .pane_updated, .data = old_ev.value });
-
     try testing.expectEqual(types.AgentStatus.working, store.agents.get(key).?.status);
-    try testing.expectEqual(@as(u64, 11), store.agents.get(key).?.revision);
 
-    // Y una genuinamente mas nueva si se aplica.
-    const fresh_json =
-        \\{"pane":{"pane_id":"wA:p5","terminal_id":"t1","workspace_id":"wA","tab_id":"wA:t3","focused":false,"agent_status":"idle","revision":12}}
+    // 2) Y la otra mitad, que es la que importa para el criterio 3: un cambio
+    //    de estado real SÍ se aplica **aunque la revisión no suba**. herdr
+    //    cambia `agent_status` sin tocar `revision` (lleva `state_change_seq`
+    //    aparte, que el payload de `pane.updated` no incluye), así que
+    //    descartar por revisión congelaba el sidebar — se probó y rompió las
+    //    actualizaciones en vivo.
+    const change =
+        \\{"pane":{"pane_id":"wA:p5","terminal_id":"t1","workspace_id":"wA","tab_id":"wA:t3","focused":false,"agent_status":"blocked","revision":11}}
     ;
-    const fresh = try json.parseFromSlice(json.Value, testing.allocator, fresh_json, .{});
-    defer fresh.deinit();
-    try store.applyEvent(.{ .event = .pane_updated, .data = fresh.value });
-
-    try testing.expectEqual(types.AgentStatus.idle, store.agents.get(key).?.status);
+    const ev = try json.parseFromSlice(json.Value, testing.allocator, change, .{});
+    defer ev.deinit();
+    try store.applyEvent(.{ .event = .pane_updated, .data = ev.value });
+    try testing.expectEqual(types.AgentStatus.blocked, store.agents.get(key).?.status);
 }
