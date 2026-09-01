@@ -2,7 +2,7 @@ const std = @import("std");
 const json = std.json;
 const testing = std.testing;
 
-const types = @import("types");
+const types = @import("../herdr/types.zig");
 
 // ---------------------------------------------------------------------------
 // Store — in-memory source of truth for the sidebar agent list.

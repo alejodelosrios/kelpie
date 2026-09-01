@@ -3,6 +3,7 @@ const ghostty_vt = @import("ghostty-vt");
 const herdr_probe = @import("herdr/probe.zig");
 const spike_b = @import("ui/spike_b.zig");
 const app_shell = @import("ui/app_shell.zig");
+const sidebar = @import("ui/sidebar.zig");
 
 pub const name = "kelpie";
 // ponytail: duplicated from build.zig.zon on purpose; wire a build option when the version is set by CI.
@@ -41,6 +42,12 @@ pub fn main(init: std.process.Init) !void {
         if (std.mem.eql(u8, arg, "--herdr-probe")) herdr_probe_flag = true;
         if (std.mem.eql(u8, arg, "--spike-b")) run_spike_b = true;
         if (std.mem.eql(u8, arg, "--version")) version_flag = true;
+        if (std.mem.eql(u8, arg, "--demo-sidebar")) {
+            app_shell.demo_sidebar_n = 4;
+        } else if (std.mem.startsWith(u8, arg, "--demo-sidebar=")) {
+            const n_str = arg["--demo-sidebar=".len..];
+            app_shell.demo_sidebar_n = std.fmt.parseInt(u32, n_str, 10) catch 4;
+        }
     }
 
     if (version_flag) {
@@ -101,4 +108,8 @@ test "version is valid semver" {
 test {
     _ = herdr_probe;
     _ = app_shell;
+    _ = sidebar;
+    // Store (#12) ya no tiene módulo de test propio: su consumidor real (el
+    // sidebar de #16) vive en el exe, así que sus tests corren aquí.
+    _ = @import("model/Store.zig");
 }

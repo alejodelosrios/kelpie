@@ -247,3 +247,47 @@ Formato: `- [YYYY-MM-DD] #issue — qué se vio · por qué no se arregló ahora
   quien toque `ThemeWatcher` o el arranque del tema —#26 (paleta del terminal) o #43 (`kelpie setup`,
   que es justo el escenario de una máquina sin `current/` poblado)— debe correr ese gate con el
   binario real antes de cerrarse.
+
+- **2026-08-31 · #16 (QA) · `ensureRunning: stopped_no_autostart never calls StatusReader` falla de forma
+  intermitente.** Falló una vez durante el QA de #16 con `errno 111` al conectar el socket, y no volvió a
+  reproducirse en 4 corridas más ni en 3 corridas de la rama base — o sea que **no lo causó #16**: es
+  anterior y vive en `src/herdr/LocalServer.zig`. Sospecha: socket o proceso residual de una corrida previa,
+  no una condición de carrera del código bajo prueba · **por qué importa**: un test que falla una de cada
+  cinco veces acaba enrojeciendo el CI, y la respuesta natural —relanzar el job hasta que salga verde— es
+  exactamente lo que el ruleset de este repo prohíbe; peor, entrena a leer un rojo como ruido · dispara:
+  quien vea este test rojo en CI **no lo relanza**: aísla el estado residual (ruta del socket por corrida,
+  limpieza en el `defer`) antes de tocar nada más, y quien vuelva a `LocalServer.zig` por cualquier motivo
+  (#81 es el siguiente candidato, que lo usará de verdad) lo arregla de paso.
+
+- **2026-08-31 · #12 (hallado auditando #16) · `pane_agent_status_changed` borra `agent`, `display_agent`
+  y `title` del agente.** `Store.zig:287-289` llama `updateOptionalField` con lo que traiga el evento, y
+  `updateOptionalField` (`Store.zig:700-704`) duplica `null`, libera lo que había y deja el campo en `null`
+  **sin condición**. Un evento de cambio de estado que solo traiga el status borra los tres campos.
+  Observado en vivo por el auditor con el binario instrumentado: la fila pasó de `claude` a `pane-0` justo
+  al bloquearse, porque `displayTitle` cae al `pane_id` · **por qué importa**: hoy no se nota porque nada
+  cablea eventos reales, pero con #81 cada cambio de estado degradará el título de la fila que el usuario
+  está mirando — y lo hará justo en el momento de máxima atención, al bloquearse · dispara: **#81, antes de
+  cablear eventos reales**. Distinguir "el evento no trae el campo" de "el evento lo pone a null" es el
+  arreglo; hoy el tipo no permite distinguirlos.
+
+- **2026-08-31 · #16 · el escenario Gherkin 7 está escrito como si pasara, y no pasa.** El diseño dice
+  «`focusAgent` recibe `("local","pane-3")`» al activar una fila, pero el click sale por
+  `onSidebarActivated` (`src/ui/app_shell.zig:317-319`), que solo loguea. Las dos direcciones son distintas
+  y el comportamiento es correcto —`focusAgent` es la entrada externa de `kelpie focus` (#17) y sí
+  selecciona— pero el escenario quedó redactado sobre una costura que no es la que se ejerce · **por qué
+  importa**: un Gherkin que describe una llamada que nadie hace es un criterio que se da por cumplido
+  leyéndolo · dispara: **#19 (attach)**, que es quien conecta esa costura de verdad — al hacerlo, reescribe
+  el escenario 7 en términos de lo que realmente ocurre y lo cubre con test.
+
+- **2026-08-31 · #16 / #14 · en temas monocromos los tres colores de estado colapsan.** La plantilla
+  `data/themed/kelpie.css.tpl:33-35` mapea `working→blue`, `blocked→yellow`, `done→green`, que es el
+  mapeo correcto según la skill `omarchy-app`. Pero un tema derivado de wallpaper puede no tener tres
+  colores distinguibles: en `wallhaven-5yk2o9` (el activo al hacer el gate visual de #16) `blue=#678194`,
+  `yellow=#c6f9ff`, `green=#9fc7d4` — tres azules. Y `orange=#97a4b7` es **peor** que `yellow`, así que
+  la regla alternativa de la skill ("si el tema trae `orange`, `orange`") tampoco salva el caso ·
+  **por qué importa**: el valor #1 del producto es que se distinga de un vistazo qué agente reclama
+  atención, y en estos temas el color no lo distingue. Lo que sí lo distingue es la **forma** del glifo
+  —spinner / triángulo con `!` / check—, que el diseño de #16 especificó por separado; es la razón por
+  la que el sidebar sigue siendo legible aquí · dispara: **#36** (sistema de diseño) y **#40** (gate M4,
+  retematizar en vivo): antes de dar por bueno el mapeo semántico, probar con un tema monocromo y
+  decidir si `blocked` necesita algo que no dependa del color del tema (peso, tamaño o un realce propio).
