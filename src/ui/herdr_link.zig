@@ -391,3 +391,30 @@ test "storeSocketPath: works on both branches — the aliasing one included" {
         try testing.expectEqualStrings("/home/tester/.cfg/herdr/herdr.sock", buf[0..len]);
     }
 }
+
+// Forma propuesta por QA al analizar por qué sus propios tests no podían cazar
+// el panic. Es mejor que probar las rutas: fija el CONTRATO. Que
+// `resolveSocketPath` devuelva un slice del buffer que recibe no es un
+// accidente de implementación —es lo que hace a propósito—, y mientras eso no
+// esté escrito en ningún sitio, cada caller nuevo puede volver a intentar un
+// `@memcpy` sobre sí mismo. Aquí queda escrito y comprobado.
+test "resolveSocketPath: el slice devuelto vive DENTRO del buffer (contrato de alias)" {
+    var env = std.process.Environ.Map.init(testing.allocator);
+    defer env.deinit();
+    try env.put("HOME", "/home/tester");
+
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    const resolved = try client.resolveSocketPath(env, &buf);
+
+    const base = @intFromPtr(&buf);
+    const got = @intFromPtr(resolved.ptr);
+    try testing.expect(got >= base and got + resolved.len <= base + buf.len);
+
+    // Y el contrapunto: con HERDR_SOCKET_PATH el slice viene de fuera, así que
+    // un caller no puede asumir NINGUNA de las dos cosas — tiene que usar una
+    // copia que tolere el alias, como hace `storeSocketPath`.
+    try env.put("HERDR_SOCKET_PATH", "/run/user/1000/herdr.sock");
+    const outside = try client.resolveSocketPath(env, &buf);
+    const got2 = @intFromPtr(outside.ptr);
+    try testing.expect(got2 < base or got2 >= base + buf.len);
+}

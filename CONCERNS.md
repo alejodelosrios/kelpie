@@ -301,3 +301,36 @@ Formato: `- [YYYY-MM-DD] #issue — qué se vio · por qué no se arregló ahora
   la que el sidebar sigue siendo legible aquí · dispara: **#36** (sistema de diseño) y **#40** (gate M4,
   retematizar en vivo): antes de dar por bueno el mapeo semántico, probar con un tema monocromo y
   decidir si `blocked` necesita algo que no dependa del color del tema (peso, tamaño o un realce propio).
+
+- **2026-09-01 · #81 · el arreglo del `Store` es correcto pero NO cierra la fila que decía cerrar.**
+  `updateOptionalField` (`Store.zig:700`) dejó de borrar con `null`, y su test lo fija. Pero su único
+  llamador es el brazo `.pane_agent_status_changed` (`Store.zig:287-289`), y **`pane.agent_status_changed`
+  está excluido a propósito de `subscription_types`** (`Events.zig:68-78`), cosa que el propio diseño de
+  #81 confirma en su "No entra". Con el cableado que entrega #81, ese brazo **no corre nunca en vivo**:
+  el camino real es `pane.updated` → `upsertAgent` (`Store.zig:618-655`), que ni siquiera toca
+  `title`/`agent` · **por qué importa**: la fila anterior sobre el borrado de campos sigue abierta, y
+  cerrarla porque "ya lo arreglamos en #81" dejaría un problema real tapado por un arreglo que apunta a
+  otro sitio · dispara: quien suscriba `pane.agent_status_changed` de verdad, o quien note la
+  degradación por el camino de `pane.updated` — hay que **volver a observarla** antes de dar la fila
+  por cerrada. Hallazgo del auditor de #81.
+
+- **2026-09-01 · #81 · las fuentes idle en vuelo al cerrar se filtran (verificado, no supuesto).**
+  `gio2.zig:894-895` dice que `shutdown` se emite «immediately after the main loop terminates», así que
+  cuando corre `onShutdown` la loop ya está muerta y ningún idle pendiente se despacha: se pierden el
+  `Box`, el `EventCtx`/`ResyncCtx` y el `json.Parsed`. Era el hueco que el diseño de #81 declaró sin
+  verificar; queda verificado y la respuesta es **fuga de salida de proceso, no use-after-free** (el
+  `Store` es global y nunca se `deinit`) · **por qué importa**: es inocuo hoy y deja de serlo el día que
+  algo con vida propia —un fd, un lock de archivo, un socket— viaje en uno de esos contextos · dispara:
+  quien haga que el `Store` se destruya de verdad al cerrar, o quien meta un recurso no-memoria en el
+  contexto de un evento.
+
+- **2026-09-01 · #81 · no hay arnés de herdr falso que tolere secuencias parciales.** QA escribió tres
+  tests de ciclo de vida de `Link` con un servidor falso; **dos colgaban la suite entera** y se
+  quitaron. La causa es del arnés, no de los tests: el falso herdr espera tres `accept` en secuencia
+  —sonda, suscripción, resync— y un escenario legítimo como "parar inmediatamente" no produce los dos
+  últimos, así que el `accept` bloquea para siempre y el `join` del `defer` no vuelve; cerrar el
+  listener antes del join no lo desbloquea en esta implementación de `std.Io` · **por qué importa**: sin
+  arnés, todo el ciclo de vida de `Link` queda en el gate manual, que es justo el que ya demostró pasar
+  en verde sobre una app rota · dispara: quien vaya a tocar `Link` o `EventsClient` — un servidor falso
+  que acepte N conexiones y responda a lo que le llegue, en vez de un guion fijo, desbloquea los tres
+  tests de golpe.
