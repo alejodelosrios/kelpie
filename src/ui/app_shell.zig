@@ -13,6 +13,8 @@ const adw = @import("adw");
 const ThemeWatcher = @import("../omarchy/ThemeWatcher.zig");
 const Store = @import("../model/Store.zig").Store;
 const types = @import("../herdr/types.zig");
+const LocalServer = @import("../herdr/LocalServer.zig");
+const herdr_link = @import("herdr_link.zig");
 const Sidebar = @import("sidebar.zig").Sidebar;
 
 const app_id = "io.github.alejodelosrios.kelpie";
@@ -105,6 +107,11 @@ var empty_state_text: [*:0]const u8 = "No agents";
 // against an empty Store — get a real, usable allocator instead of garbage.
 var gpa: std.mem.Allocator = std.heap.page_allocator;
 
+// Saved from init.environ_map / init.io in run(), so onActivate can pass
+// them to herdr_link.start().  Same "set once in run()" pattern as gpa.
+var io: std.Io = undefined;
+var environ_map: *std.process.Environ.Map = undefined;
+
 // The Store (#12) and Sidebar (#16) this app owns. `store` needs no GTK/display
 // and is built lazily the first time anything needs it (including from a
 // `focus` command-line arriving before any `activate`); `sidebar`'s widget
@@ -113,6 +120,15 @@ var store: Store = undefined;
 var store_inited = false;
 var sidebar: Sidebar = undefined;
 var sidebar_inited = false;
+
+// Herdr link (#81): owns the startup thread and EventsClient.
+// Started once from onActivate, stopped from the shutdown signal.
+var link: herdr_link.Link = .{};
+var link_started: bool = false;
+
+// Reference to the empty-state label widget, so the herdr_link startup
+// thread can update its text once the server status is known.
+var empty_label_ref: ?*gtk.Label = null;
 
 /// `--demo-sidebar[=N]` (design #16 §"--demo-sidebar[=N]"): set by `main.zig`
 /// before `run()`, read once by the first `onActivate`. `null` = no demo data.
@@ -134,12 +150,27 @@ var theme_watcher_started: bool = false;
 
 /// Picks the empty-state label text by locale prefix (see design #13 §"No entra" —
 /// no translation framework, just a `LANG`/`LC_ALL` prefix check).
+/// Used only at startup (before the herdr link publishes the real status).
+/// The real status-specific text arrives via the dispatcher trampoline,
+/// which calls `emptyStateTextWithKind` directly.
 fn emptyStateText(lang: []const u8) [*:0]const u8 {
-    return if (std.mem.startsWith(u8, lang, "es")) "Sin agentes" else "No agents";
+    const is_es = std.mem.startsWith(u8, lang, "es");
+    return if (is_es) "Sin agentes" else "No agents";
+}
+
+fn emptyStateTextWithKind(lang: []const u8, kind: LocalServer.Kind) [*:0]const u8 {
+    const is_es = std.mem.startsWith(u8, lang, "es");
+    return switch (kind) {
+        .connected, .launched => if (is_es) "Sin agentes" else "No agents",
+        .launch_timed_out => if (is_es) "herdr no respondio" else "herdr did not respond",
+        .stopped_no_autostart => if (is_es) "herdr detenido" else "herdr stopped",
+    };
 }
 
 pub fn run(init: std.process.Init) u8 {
     gpa = init.gpa;
+    io = init.io;
+    environ_map = init.environ_map;
     const lang = init.environ_map.get("LANG") orelse init.environ_map.get("LC_ALL") orelse "";
     empty_state_text = emptyStateText(lang);
 
@@ -148,6 +179,7 @@ pub fn run(init: std.process.Init) u8 {
 
     _ = gio.Application.signals.activate.connect(app, ?*anyopaque, &onActivate, null, .{});
     _ = gio.Application.signals.command_line.connect(app, ?*anyopaque, &onCommandLine, null, .{});
+    _ = gio.Application.signals.shutdown.connect(app, ?*anyopaque, &onShutdown, null, .{});
 
     // Build real argv from init so GIO sends remaining args to the primary
     // instance (G_APPLICATION_HANDLES_COMMAND_LINE requires real argv — passing
@@ -178,6 +210,10 @@ fn onActivate(app: *adw.Application, _: ?*anyopaque) callconv(.c) void {
 
     startThemeWatcherOnce();
 
+    // Start herdr link (#81): connects to herdr, subscribes to events,
+    // and wires callbacks that mutate the Store from the UI thread.
+    startLinkOnce();
+
     const window = adw.ApplicationWindow.new(gtk_app);
     gtk.Window.setDefaultSize(gobject.ext.as(gtk.Window, window), 1100, 700);
     gtk.Window.setTitle(gobject.ext.as(gtk.Window, window), "kelpie");
@@ -192,6 +228,7 @@ fn onActivate(app: *adw.Application, _: ?*anyopaque) callconv(.c) void {
     ensureSidebarInited();
 
     const empty_label = gtk.Label.new(empty_state_text);
+    empty_label_ref = empty_label;
     gtk.Widget.addCssClass(gobject.ext.as(gtk.Widget, empty_label), "kelpie-empty-label");
     gtk.Widget.setHalign(gobject.ext.as(gtk.Widget, empty_label), .center);
     gtk.Widget.setValign(gobject.ext.as(gtk.Widget, empty_label), .center);
@@ -308,6 +345,38 @@ fn ensureStoreInited() void {
     if (store_inited) return;
     store_inited = true;
     store = Store.init(gpa);
+}
+
+/// Starts the herdr link once (idempotent).  Safe to call from onActivate
+/// — the startup thread may block for ~10 s in ensureRunning, but that
+/// doesn't hang the UI because it's in its own thread.
+fn startLinkOnce() void {
+    if (link_started) return;
+    link_started = true;
+    ensureStoreInited();
+
+    // Register the callback so the startup thread's trampoline can
+    // update the empty-state label from the UI thread.
+    herdr_link.updateStatusLabel = &onStatusLabelUpdate;
+
+    link.start(gpa, io, environ_map, &store);
+}
+
+/// Called from the herdr_link trampoline (UI thread) once the startup
+/// thread has determined the server status.  Updates the empty-state
+/// label text to explain why there are no agents.
+fn onStatusLabelUpdate(kind: LocalServer.Kind) void {
+    if (empty_label_ref) |label| {
+        const lang = environ_map.get("LANG") orelse environ_map.get("LC_ALL") orelse "";
+        const text = emptyStateTextWithKind(lang, kind);
+        gtk.Label.setLabel(label, text);
+    }
+}
+
+/// GApplication shutdown handler: stops the herdr link (joins startup
+/// thread, stops EventsClient) before the main loop exits.
+fn onShutdown(_: *adw.Application, _: ?*anyopaque) callconv(.c) void {
+    link.stop();
 }
 
 /// Builds the Sidebar widget once `ensureStoreInited` has run, registers it
@@ -560,6 +629,7 @@ fn toggleSidebar(_: *gtk.Widget, _: ?*glib.Variant, user_data: ?*anyopaque) call
 // way main.zig's `test { _ = app_shell; }` already runs this file's tests.
 test {
     _ = ThemeWatcher;
+    _ = herdr_link;
 }
 
 test "emptyStateText picks Spanish for an es locale" {
@@ -581,6 +651,32 @@ test "emptyStateText picks English when LANG is empty" {
 test "emptyStateText does not match locales that merely contain es, only a leading prefix" {
     // "test_ES" doesn't start with "es" (case-sensitive, prefix check) — must fall back to English.
     try std.testing.expectEqualStrings("No agents", std.mem.span(emptyStateText("fr_es_FR")));
+}
+
+// --- emptyStateTextWithKind tests (design #81) ---
+
+test "emptyStateTextWithKind: .launch_timed_out in English" {
+    try std.testing.expectEqualStrings("herdr did not respond", std.mem.span(emptyStateTextWithKind("en_US.UTF-8", .launch_timed_out)));
+}
+
+test "emptyStateTextWithKind: .launch_timed_out in Spanish" {
+    try std.testing.expectEqualStrings("herdr no respondio", std.mem.span(emptyStateTextWithKind("es", .launch_timed_out)));
+}
+
+test "emptyStateTextWithKind: .stopped_no_autostart in English" {
+    try std.testing.expectEqualStrings("herdr stopped", std.mem.span(emptyStateTextWithKind("en", .stopped_no_autostart)));
+}
+
+test "emptyStateTextWithKind: .stopped_no_autostart in Spanish" {
+    try std.testing.expectEqualStrings("herdr detenido", std.mem.span(emptyStateTextWithKind("es_MX.UTF-8", .stopped_no_autostart)));
+}
+
+test "emptyStateTextWithKind: .connected defaults to No agents" {
+    try std.testing.expectEqualStrings("No agents", std.mem.span(emptyStateTextWithKind("", .connected)));
+}
+
+test "emptyStateTextWithKind: .launched defaults to No agents" {
+    try std.testing.expectEqualStrings("No agents", std.mem.span(emptyStateTextWithKind("", .launched)));
 }
 
 // --- parseCommand tests ---
