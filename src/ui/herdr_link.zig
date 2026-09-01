@@ -39,15 +39,24 @@ pub const GlibDispatcher = struct {
         const self: *GlibDispatcher = @ptrCast(@alignCast(ptr));
         const box = try self.gpa.create(Box);
         box.* = .{ .gpa = self.gpa, .task = task, .ctx = task_ctx };
-        glib.MainContext.invoke(null, &trampoline, box);
+        // `idleAddOnce`, NO `MainContext.invoke`. Lo destapó el test del hilo de
+        // este mismo archivo: `g_main_context_invoke` ejecuta la función **en
+        // línea** cuando el hilo que llama puede adquirir el contexto, y sin main
+        // loop dueña puede. Eso dejaba la garantía —"el Store solo se toca desde
+        // el hilo de UI"— dependiendo de que la loop estuviera viva y fuera dueña,
+        // así que en las ventanas de arranque y cierre el hilo lector habría
+        // mutado el Store directamente: justo la carrera que este issue impide.
+        // Una fuente idle SIEMPRE se encola y la drena la loop, nunca el llamador.
+        _ = glib.idleAddOnce(&trampoline, box);
     }
 };
 
-fn trampoline(data: ?*anyopaque) callconv(.c) c_int {
+/// `glib.SourceOnceFunc` (glib2.zig:25660): devuelve void — una fuente "once" se
+/// quita sola, no hay `G_SOURCE_REMOVE` que devolver.
+fn trampoline(data: ?*anyopaque) callconv(.c) void {
     const box: *Box = @ptrCast(@alignCast(data.?));
     box.task(box.ctx);
     box.gpa.destroy(box);
-    return 0; // G_SOURCE_REMOVE
 }
 
 // ---------------------------------------------------------------------------
@@ -264,7 +273,7 @@ test "GlibDispatcher: Box is heap-allocated (not stack)" {
     }
 }
 
-test "trampoline: calls task and returns G_SOURCE_REMOVE (0)" {
+test "trampoline: calls the task" {
     // Direct trampoline call — exercises the function without GLib.
     var called = false;
     const TestCtx = struct {
@@ -286,8 +295,10 @@ test "trampoline: calls task and returns G_SOURCE_REMOVE (0)" {
         .ctx = &ctx,
     };
 
-    const result = trampoline(box_ptr);
-    try testing.expectEqual(@as(c_int, 0), result);
+    // `SourceOnceFunc` devuelve void: una fuente "once" se quita sola, no hay
+    // `G_SOURCE_REMOVE` que comprobar. Lo que sí se comprueba es que la tarea
+    // corrió y que el Box quedó liberado (lo verifica testing.allocator).
+    trampoline(box_ptr);
     try testing.expect(called);
 }
 
