@@ -635,7 +635,15 @@ fn upsertAgent(self: *Store, pane: types.PaneInfo, allow_create: bool) !void {
             fireTransition(&self.observers, existing, from_status, pane.agent_status);
         }
         fireChanged(&self.observers);
-    } else if (allow_create) {
+    } else if (allow_create and pane.agent_status != .unknown) {
+        // `agent_status == .unknown` es la única señal que `PaneInfo` trae para
+        // distinguir un pane que hospeda un agente de una shell cualquiera: el
+        // payload de `pane.created`/`pane.updated` no incluye el campo `agent`.
+        // Sin esta guarda el Store se llena de panes normales y el sidebar los
+        // dibuja como filas sin título —`displayTitle` cae al `pane_id`—, que es
+        // exactamente lo que apareció en el gate de integración: 14 filas para 7
+        // agentes reales. Un agente que ya existe NO se borra si su status pasa a
+        // `unknown`; la guarda es solo para crear.
         const duped_key = AgentKey{
             .device_id = try self.gpa.dupe(u8, "local"),
             .pane_id = try self.gpa.dupe(u8, pane.pane_id),
@@ -1283,4 +1291,28 @@ test "pane_agent_status_changed without title preserves existing title" {
     try testing.expectEqualStrings("claude", store.agents.get(key).?.title.?);
     // Status did change.
     try testing.expectEqual(types.AgentStatus.blocked, store.agents.get(key).?.status);
+}
+
+test "pane.created for a non-agent pane does not create an agent row" {
+    var store = Store.init(testing.allocator);
+    defer store.deinit();
+
+    // Un pane normal (una shell): herdr lo manda con agent_status "unknown" y
+    // sin campo `agent`. Antes de la guarda esto creaba una fila fantasma.
+    const shell_json =
+        \\{"pane":{"pane_id":"w3:p3","terminal_id":"t3","workspace_id":"w3","tab_id":"w3:t4","focused":false,"agent_status":"unknown","revision":1}}
+    ;
+    const shell = try json.parseFromSlice(json.Value, testing.allocator, shell_json, .{});
+    defer shell.deinit();
+    try store.applyEvent(.{ .event = .pane_created, .data = shell.value });
+    try testing.expectEqual(@as(usize, 0), store.agents.count());
+
+    // Y el contrapunto: un pane que sí hospeda un agente sigue creándose.
+    const agent_json =
+        \\{"pane":{"pane_id":"w5:p1","terminal_id":"t1","workspace_id":"w5","tab_id":"w5:t1","focused":false,"agent_status":"idle","revision":1}}
+    ;
+    const ag = try json.parseFromSlice(json.Value, testing.allocator, agent_json, .{});
+    defer ag.deinit();
+    try store.applyEvent(.{ .event = .pane_created, .data = ag.value });
+    try testing.expectEqual(@as(usize, 1), store.agents.count());
 }
