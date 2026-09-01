@@ -8,15 +8,16 @@ const types = @import("types.zig");
 
 /// Callback delivery seam: `EventsClient`'s reader thread never calls
 /// `on_event`/`on_resynced` directly — it always goes through
-/// `Dispatcher.invoke`. Production wraps `glib.MainContext.invoke`; that
-/// binding lives in a future UI issue (this file stays gobject-free, per
-/// roadmap/designs/10-eventos-reconexion.md's dispatcher decision).
+/// `Dispatcher.invoke`. Production wraps `glib.MainContext.invoke`
+/// (lives in `src/ui/herdr_link.zig`); that binding packs two pointers
+/// (`task` + `task_ctx`) into the single `user_data` GLib accepts, which
+/// requires a heap allocation that can fail — hence `!void`.
 pub const Dispatcher = struct {
     ptr: *anyopaque,
-    invokeFn: *const fn (ptr: *anyopaque, task: *const fn (ctx: *anyopaque) void, task_ctx: *anyopaque) void,
+    invokeFn: *const fn (ptr: *anyopaque, task: *const fn (ctx: *anyopaque) void, task_ctx: *anyopaque) anyerror!void,
 
-    pub fn invoke(self: Dispatcher, task: *const fn (ctx: *anyopaque) void, task_ctx: *anyopaque) void {
-        self.invokeFn(self.ptr, task, task_ctx);
+    pub fn invoke(self: Dispatcher, task: *const fn (ctx: *anyopaque) void, task_ctx: *anyopaque) !void {
+        return self.invokeFn(self.ptr, task, task_ctx);
     }
 };
 
@@ -188,7 +189,11 @@ pub const EventsClient = struct {
             return;
         };
         ctx.* = .{ .client = self, .parsed = parsed_snapshot };
-        self.dispatcher.invoke(resyncTrampoline, ctx);
+        self.dispatcher.invoke(resyncTrampoline, ctx) catch {
+            parsed_snapshot.deinit();
+            self.gpa.destroy(ctx);
+            return;
+        };
     }
 
     fn deliverEvent(self: *EventsClient, line: []const u8) !void {
@@ -198,7 +203,11 @@ pub const EventsClient = struct {
         // Same heap-ownership-transfer reasoning as `resync()` above.
         const ctx = try self.gpa.create(EventCtx);
         ctx.* = .{ .client = self, .parsed = parsed };
-        self.dispatcher.invoke(eventTrampoline, ctx);
+        self.dispatcher.invoke(eventTrampoline, ctx) catch {
+            // errdefer frees `parsed`; we only need to destroy the ctx.
+            self.gpa.destroy(ctx);
+            return error.OutOfMemory;
+        };
     }
 };
 
@@ -350,10 +359,10 @@ const ThreadIdDispatcher = struct {
         task_ctx: *anyopaque,
     };
 
-    fn invokeImpl(ptr: *anyopaque, task: *const fn (ctx: *anyopaque) void, task_ctx: *anyopaque) void {
+    fn invokeImpl(ptr: *anyopaque, task: *const fn (ctx: *anyopaque) void, task_ctx: *anyopaque) anyerror!void {
         const self: *@This() = @ptrCast(@alignCast(ptr));
         const args = Args{ .self = self, .caller_id = std.Thread.getCurrentId(), .task = task, .task_ctx = task_ctx };
-        const t = std.Thread.spawn(.{}, runTask, .{args}) catch return;
+        const t = try std.Thread.spawn(.{}, runTask, .{args});
         t.join();
     }
 
@@ -382,7 +391,7 @@ const QueueingDispatcher = struct {
         return .{ .ptr = self, .invokeFn = invokeImpl };
     }
 
-    fn invokeImpl(ptr: *anyopaque, task: *const fn (ctx: *anyopaque) void, task_ctx: *anyopaque) void {
+    fn invokeImpl(ptr: *anyopaque, task: *const fn (ctx: *anyopaque) void, task_ctx: *anyopaque) anyerror!void {
         const self: *@This() = @ptrCast(@alignCast(ptr));
         const i = self.len.fetchAdd(1, .acq_rel);
         if (i < self.queue.len) self.queue[i] = .{ .task = task, .ctx = task_ctx };

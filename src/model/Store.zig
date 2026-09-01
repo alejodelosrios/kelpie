@@ -698,7 +698,12 @@ fn freeOptional(gpa: std.mem.Allocator, val: ?[]const u8) void {
 }
 
 fn updateOptionalField(gpa: std.mem.Allocator, field: *?[]const u8, new_val: ?[]const u8) !void {
-    const duped = try dupeOptional(gpa, new_val);
+    // `null` means "the event does not carry this field", not "set it to
+    // null".  Real deletion arrives via `applySnapshot`, which replaces the
+    // whole agent.  Skipping avoids a `pane_agent_status_changed` that only
+    // carries `agent_status` from wiping `agent`/`display_agent`/`title`.
+    const val = new_val orelse return;
+    const duped = try gpa.dupe(u8, val);
     freeOptional(gpa, field.*);
     field.* = duped;
 }
@@ -1240,4 +1245,42 @@ test "pane_focused for unknown pane_id is a no-op (does not clear other agents' 
     // p1 must still be focused — the unknown pane must not have cleared it.
     const key = AgentKey{ .device_id = "local", .pane_id = "p1" };
     try testing.expect(store.agents.get(key).?.focused);
+}
+
+test "pane_agent_status_changed without title preserves existing title" {
+    var store = Store.init(testing.allocator);
+    defer store.deinit();
+
+    // Seed an agent whose displayTitle resolves via .title ("claude").
+    const agents = [_]types.AgentInfo{.{
+        .terminal_id = "t1",
+        .agent_status = .working,
+        .workspace_id = "w1",
+        .tab_id = "tab1",
+        .pane_id = "p1",
+        .focused = false,
+        .revision = 1,
+        .agent = "claude",
+        .title = "claude",
+    }};
+    try store.applySnapshot(makeSnapshot(&agents, &.{}, &.{}));
+
+    const key = AgentKey{ .device_id = "local", .pane_id = "p1" };
+    try testing.expectEqualStrings("claude", store.agents.get(key).?.displayTitle());
+
+    // pane_agent_status_changed that only carries status — no title, no agent,
+    // no display_agent.  Before the fix this would null out all three and
+    // displayTitle() would fall back to pane_id ("p1").
+    const event_json =
+        \\{"pane_id":"p1","workspace_id":"w1","agent_status":"blocked"}
+    ;
+    const parsed = try json.parseFromSlice(json.Value, testing.allocator, event_json, .{});
+    defer parsed.deinit();
+    try store.applyEvent(.{ .event = .pane_agent_status_changed, .data = parsed.value });
+
+    // Title must survive.
+    try testing.expectEqualStrings("claude", store.agents.get(key).?.displayTitle());
+    try testing.expectEqualStrings("claude", store.agents.get(key).?.title.?);
+    // Status did change.
+    try testing.expectEqual(types.AgentStatus.blocked, store.agents.get(key).?.status);
 }
