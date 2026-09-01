@@ -155,7 +155,15 @@ pub const EventsClient = struct {
         // happens for the rest of this cycle.
         backoff_ms.* = backoff_start_ms;
 
-        self.resync();
+        // `try`, no fire-and-forget: sin snapshot la conexión NO sirve. El
+        // snapshot es la única fuente de la identidad de un agente (título,
+        // agente, cwd); los eventos de pane solo traen estado. Si `resync`
+        // falla y seguimos leyendo, el store se queda poblado solo por el
+        // replay de `pane.created`, que produce filas con el `pane_id` pelado
+        // — exactamente lo que apareció al matar y relevantar el servidor en el
+        // gate de integración. Fallar aquí devuelve el control a `run()`, que
+        // reintenta el ciclo completo con backoff.
+        try self.resync();
 
         while (true) {
             const line = try takeLine(&conn.reader.interface);
@@ -166,20 +174,20 @@ pub const EventsClient = struct {
         }
     }
 
-    fn resync(self: *EventsClient) void {
+    fn resync(self: *EventsClient) !void {
         var rpc_err: ?client.RpcError = null;
         const resp = client.request(self.gpa, self.io, self.socket_path, "session.snapshot", .{}, client.default_read_timeout_ms, &rpc_err) catch |err| {
             if (err == error.HerdrRpc) rpc_err.?.deinit(self.gpa);
-            return;
+            return err;
         };
         defer resp.deinit();
-        if (resp.value != .object) return;
+        if (resp.value != .object) return error.UnexpectedResponse;
 
-        const result = resp.value.object.get("result") orelse return;
-        if (result != .object) return;
-        const snapshot_value = result.object.get("snapshot") orelse return;
+        const result = resp.value.object.get("result") orelse return error.UnexpectedResponse;
+        if (result != .object) return error.UnexpectedResponse;
+        const snapshot_value = result.object.get("snapshot") orelse return error.UnexpectedResponse;
 
-        const parsed_snapshot = json.parseFromValue(types.SessionSnapshot, self.gpa, snapshot_value, .{ .ignore_unknown_fields = true }) catch return;
+        const parsed_snapshot = json.parseFromValue(types.SessionSnapshot, self.gpa, snapshot_value, .{ .ignore_unknown_fields = true }) catch |err| return err;
         errdefer parsed_snapshot.deinit();
 
         // Heap-allocated, not a stack local: `Dispatcher.invoke` isn't
@@ -187,15 +195,15 @@ pub const EventsClient = struct {
         // which can queue and return before the task runs) — the trampoline
         // frees both the parsed snapshot and this ctx once it's actually
         // done with them.
-        const ctx = self.gpa.create(ResyncCtx) catch {
+        const ctx = self.gpa.create(ResyncCtx) catch |err| {
             parsed_snapshot.deinit();
-            return;
+            return err;
         };
         ctx.* = .{ .client = self, .parsed = parsed_snapshot };
-        self.dispatcher.invoke(resyncTrampoline, ctx) catch {
+        self.dispatcher.invoke(resyncTrampoline, ctx) catch |err| {
             parsed_snapshot.deinit();
             self.gpa.destroy(ctx);
-            return;
+            return err;
         };
     }
 
