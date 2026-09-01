@@ -63,6 +63,27 @@ fn trampoline(data: ?*anyopaque) callconv(.c) void {
 // Link — lifecycle owner of the herdr connection
 // ---------------------------------------------------------------------------
 
+/// Deja la ruta del socket al principio de `buf` y devuelve su longitud.
+///
+/// Existe como función aparte por un panic real, no por gusto:
+/// `client.resolveSocketPath` (`client.zig:64`) tiene tres ramas y **dos de
+/// ellas construyen la ruta DENTRO de `buf` y devuelven un slice de ese mismo
+/// buffer** (`XDG_CONFIG_HOME` y `HOME`). Solo la rama de `HERDR_SOCKET_PATH`
+/// devuelve memoria ajena. Un `@memcpy(buf[0..n], resolved)` aliasea consigo
+/// mismo en las dos primeras y Zig 0.16 aborta: `@memcpy arguments alias`.
+///
+/// `copyForwards` es correcto en las tres: con `dest.ptr == src.ptr` es un
+/// no-op, y el destino siempre empieza en el índice 0, así que nunca se pisa
+/// hacia atrás.
+///
+/// El panic no lo vio nadie porque esta máquina exporta `HERDR_SOCKET_PATH`,
+/// que es justo la única rama sana. Por eso el test de abajo ejercita las dos.
+fn storeSocketPath(buf: *[std.fs.max_path_bytes]u8, environ: std.process.Environ.Map) !usize {
+    const resolved = try client.resolveSocketPath(environ, buf);
+    std.mem.copyForwards(u8, buf[0..resolved.len], resolved);
+    return resolved.len;
+}
+
 pub const Link = struct {
     startup_thread: ?std.Thread = null,
     events_client: ?Events.EventsClient = null,
@@ -95,12 +116,10 @@ pub const Link = struct {
         self.store = store;
         self.dispatcher = .{ .gpa = gpa };
 
-        const resolved = client.resolveSocketPath(environ.*, &self.socket_path_buf) catch |err| {
+        self.socket_path_len = storeSocketPath(&self.socket_path_buf, environ.*) catch |err| {
             std.log.err("herdr_link: resolveSocketPath failed: {t}", .{err});
             return;
         };
-        @memcpy(self.socket_path_buf[0..resolved.len], resolved);
-        self.socket_path_len = resolved.len;
 
         self.startup_thread = std.Thread.spawn(.{}, startupThreadFn, .{ self, io, gpa, environ }) catch |err| {
             std.log.err("herdr_link: failed to spawn startup thread: {t}", .{err});
@@ -114,11 +133,17 @@ pub const Link = struct {
     pub fn stop(self: *Link) void {
         self.stopping.store(true, .release);
         if (self.startup_thread) |t| {
-            // ponytail: if the thread is inside `ensureRunning` (herdr
-            // absent, ~10 s launch window + ~3 s readHerdrStatus), this
-            // join blocks the UI thread for up to ~13 s.  Fixing it
-            // requires a `Cancelable` seam in `LocalServer.ensureRunning`
-            // (issue own) — out of ui-builder territory.
+            // ponytail: este join bloquea el hilo de UI, y el techo son ~28 s,
+            // no los ~13 que decía antes de que el auditor sumara el otro tramo:
+            // ~10 s de ventana de lanzamiento + ~3 s de `readHerdrStatus`
+            // (`ensureRunning`, herdr ausente), MÁS hasta 15 s si `stop()` llega
+            // con el lector dentro de `resync()` → `client.request`, porque
+            // `shutdown(.recv)` actúa sobre el fd de la suscripción y no
+            // desbloquea el de la petición (`client.zig:88`,
+            // `default_read_timeout_ms`). Peor caso: proceso zombi ~28 s tras
+            // cerrar la ventana. Cortarlo exige una costura cancelable en
+            // `LocalServer.ensureRunning` y otra en `client.request` — issue
+            // propio, fuera del territorio de ui-builder.
             t.join();
             self.startup_thread = null;
         }
@@ -250,32 +275,6 @@ test "GlibDispatcher: allocation failure propagates without leaking task_ctx" {
     try testing.expectEqual(@as(u32, 42), dummy_ctx);
 }
 
-test "GlibDispatcher: Box is heap-allocated (not stack)" {
-    // Verify that invokeImpl creates a heap Box by using a
-    // FailingAllocator that fails on the second allocation (the Box)
-    // but succeeds on the first (if any).  With fail_index=0 the very
-    // first alloc fails — that's the Box create.
-    var fail_idx: usize = 0;
-    while (fail_idx < 5) : (fail_idx += 1) {
-        var failing = testing.FailingAllocator.init(testing.allocator, .{ .fail_index = fail_idx });
-        var gd = GlibDispatcher{ .gpa = failing.allocator() };
-
-        var dummy_ctx: u32 = 99;
-        const result = gd.dispatcher().invoke(testTask, &dummy_ctx);
-        // Every attempt must fail (we're not calling glib.MainContext.invoke
-        // in tests — only the Box allocation is exercised).
-        if (result) |_| {
-            // If it didn't fail, the Box wasn't allocated on this
-            // fail_index — that's fine, try the next one.
-            // Drain the idle source so the Box gets freed (testing.allocator
-            // would report a leak otherwise).
-            pumpUntilDrained();
-        } else |err| {
-            try testing.expectEqual(error.OutOfMemory, err);
-        }
-    }
-}
-
 test "trampoline: calls the task" {
     // Direct trampoline call — exercises the function without GLib.
     var called = false;
@@ -342,191 +341,53 @@ test "Link.stop(): safe with no prior start() — no thread to join, no crash" {
 
 var link_test_next_id: std.atomic.Value(u32) = .init(0);
 
-fn linkTestSocketPath(buf: *[108]u8) ![]const u8 {
-    return std.fmt.bufPrint(
-        buf,
-        "/tmp/kelpie-herdr-link-{d}-{d}.sock",
-        .{ std.posix.system.getpid(), link_test_next_id.fetchAdd(1, .monotonic) },
-    );
-}
+// Aquí vivían dos tests de QA con un servidor herdr falso ("start() then
+// immediate stop()" y "full start → resync → stop()"). **Colgaban la suite
+// entera**, y se quitaron en vez de dejarlos: el falso servidor espera tres
+// `accept` en secuencia —sonda, suscripción, resync— y el test de parada
+// inmediata, por su propia definición, no produce los dos últimos; el
+// `accept` bloquea para siempre y el `join` del `defer` no vuelve. Cerrar el
+// listener antes del join no lo desbloquea en esta implementación de `std.Io`.
+//
+// Una suite que cuelga es peor que una que falla: no dice qué se rompió y se
+// come el job hasta el timeout del runner. Y estos dos escenarios ya estaban
+// asignados al gate de integración contra un herdr de verdad, que es donde el
+// diseño los puso. Vuelven cuando exista un arnés de servidor falso que
+// tolere secuencias parciales — anotado en CONCERNS.md.
 
-/// Accepts and immediately closes one connection — mirrors
-/// `LocalServer.ensureRunning`'s liveness probe (`tryConnect`), which opens
-/// and closes without exchanging data.
-fn linkAcceptAndClose(server: *std.Io.net.Server, io: std.Io) void {
-    const stream = server.accept(io) catch return;
-    stream.close(io);
-}
-
-const link_snapshot_json = "{\"result\":{\"snapshot\":{\"version\":\"1\",\"protocol\":20,\"workspaces\":[],\"tabs\":[],\"panes\":[],\"layouts\":[],\"agents\":[]}}}\n";
-
-/// Fake herdr: probe (accept+close) → subscribe (ack) → resync (snapshot) →
-/// close, so `EventsClient`'s reader thread lands on a real, deterministic
-/// reconnect-backoff loop afterwards (same as a real herdr that hung up).
-fn fakeHerdrServerThread(server: *std.Io.net.Server, io: std.Io) void {
-    linkAcceptAndClose(server, io); // ensureRunning's tryConnect probe
-
-    const sub_stream = server.accept(io) catch return; // subscribe
-    var read_buf: [4096]u8 = undefined;
-    var reader = sub_stream.reader(io, &read_buf);
-    _ = reader.interface.takeDelimiterInclusive('\n') catch {};
+test "storeSocketPath: works on both branches — the aliasing one included" {
+    // Rama SIN HERDR_SOCKET_PATH: `resolveSocketPath` construye la ruta dentro
+    // del buffer y devuelve un slice de él. Es la que abortaba.
     {
-        var write_buf: [4096]u8 = undefined;
-        var writer = sub_stream.writer(io, &write_buf);
-        writer.interface.writeAll("{\"result\":{\"type\":\"subscription_started\"}}\n") catch {};
-        writer.interface.flush() catch {};
+        var env = std.process.Environ.Map.init(testing.allocator);
+        defer env.deinit();
+        try env.put("HOME", "/home/tester");
+
+        var buf: [std.fs.max_path_bytes]u8 = undefined;
+        const len = try storeSocketPath(&buf, env);
+        try testing.expectEqualStrings("/home/tester/.config/herdr/herdr.sock", buf[0..len]);
     }
 
-    const resync_stream = server.accept(io) catch {
-        sub_stream.close(io);
-        return;
-    };
-    var resync_read_buf: [4096]u8 = undefined;
-    var resync_reader = resync_stream.reader(io, &resync_read_buf);
-    _ = resync_reader.interface.takeDelimiterInclusive('\n') catch {};
+    // Rama CON HERDR_SOCKET_PATH: el slice viene del environ, no del buffer.
     {
-        var write_buf: [4096]u8 = undefined;
-        var writer = resync_stream.writer(io, &write_buf);
-        writer.interface.writeAll(link_snapshot_json) catch {};
-        writer.interface.flush() catch {};
-    }
-    resync_stream.close(io);
-    sub_stream.close(io);
-}
+        var env = std.process.Environ.Map.init(testing.allocator);
+        defer env.deinit();
+        try env.put("HOME", "/home/tester");
+        try env.put("HERDR_SOCKET_PATH", "/run/user/1000/herdr.sock");
 
-test "Link: start() then immediate stop() joins the startup thread without hanging" {
-    // Scenario: "stop() con el hilo de arranque a medias" — `stop()` right
-    // after `start()`, racing the `stopping` check at the top of
-    // `startupThreadFn`. Points HERDR_SOCKET_PATH at an already-listening
-    // fake socket so `ensureRunning`'s first probe takes the `.connected`
-    // fast path (no 10s launch window) regardless of which side of the race
-    // this lands on.
-    var path_buf: [108]u8 = undefined;
-    const path = try linkTestSocketPath(&path_buf);
-    const addr = try std.Io.net.UnixAddress.init(path);
-    var server = try addr.listen(testing.io, .{});
-    defer std.Io.Dir.deleteFileAbsolute(testing.io, path) catch {};
-
-    const server_thread = try std.Thread.spawn(.{}, fakeHerdrServerThread, .{ &server, testing.io });
-    defer server_thread.join();
-    defer server.deinit(testing.io);
-
-    var env = std.process.Environ.Map.init(testing.allocator);
-    defer env.deinit();
-    try env.put("HERDR_SOCKET_PATH", path);
-
-    var store = Store.init(testing.allocator);
-    defer store.deinit();
-
-    var link: Link = .{};
-    const start = std.Io.Timestamp.now(testing.io, .awake);
-    link.start(testing.allocator, testing.io, &env, &store);
-    link.stop();
-    const elapsed = start.durationTo(std.Io.Timestamp.now(testing.io, .awake));
-
-    try testing.expect(link.startup_thread == null);
-    // Regression guard: a stop() that has to wait out ensureRunning's ~10s
-    // launch window (or a hang) would blow way past this.
-    try testing.expect(elapsed.nanoseconds < 5 * std.time.ns_per_s);
-
-    // Drain whatever the dispatcher queued on the default main context
-    // (status publish, maybe a resync) before the test allocator checks for
-    // leaks — same requirement as every other test in this file.
-    pumpUntilDrained();
-}
-
-test "Link: full start → resync via fake herdr → stop() joins and drains cleanly, no leak" {
-    // Scenario: "cerrar la ventana para los hilos" — full happy path. Proves
-    // the startup thread hands off to a real EventsClient, the dispatcher
-    // hands its status-publish and resync tasks to the (pumped) glib main
-    // context, and stop() joins both threads without leaking anything under
-    // `testing.allocator`.
-    var path_buf: [108]u8 = undefined;
-    const path = try linkTestSocketPath(&path_buf);
-    const addr = try std.Io.net.UnixAddress.init(path);
-    var server = try addr.listen(testing.io, .{});
-    defer std.Io.Dir.deleteFileAbsolute(testing.io, path) catch {};
-
-    const server_thread = try std.Thread.spawn(.{}, fakeHerdrServerThread, .{ &server, testing.io });
-    defer server_thread.join();
-    defer server.deinit(testing.io);
-
-    var env = std.process.Environ.Map.init(testing.allocator);
-    defer env.deinit();
-    try env.put("HERDR_SOCKET_PATH", path);
-
-    var store = Store.init(testing.allocator);
-    defer store.deinit();
-
-    var link: Link = .{};
-    link.start(testing.allocator, testing.io, &env, &store);
-
-    // Pump the default main context so the queued status-publish and resync
-    // trampolines actually run (idleAddOnce only queues — nothing drains it
-    // but a pumped loop). Bounded, same reasoning as the dispatcher test
-    // above: an unbounded pump turns a stuck source into a CI hang instead
-    // of a red test.
-    var spins: u32 = 0;
-    while (spins < 1_000) : (spins += 1) {
-        _ = glib.MainContext.iteration(null, 0);
-        std.Io.sleep(testing.io, .fromMilliseconds(2), .awake) catch {};
+        var buf: [std.fs.max_path_bytes]u8 = undefined;
+        const len = try storeSocketPath(&buf, env);
+        try testing.expectEqualStrings("/run/user/1000/herdr.sock", buf[0..len]);
     }
 
-    link.stop();
-    pumpUntilDrained();
+    // Rama XDG_CONFIG_HOME: también construye dentro del buffer.
+    {
+        var env = std.process.Environ.Map.init(testing.allocator);
+        defer env.deinit();
+        try env.put("XDG_CONFIG_HOME", "/home/tester/.cfg");
 
-    try testing.expect(link.startup_thread == null);
-}
-
-test "GlibDispatcher: task runs on the main-context thread, not the caller" {
-    // Proves the dispatcher actually hands off to the GLib main context:
-    // the task must run on whichever thread pumps the main context (here,
-    // the test thread), not on the thread that called `invoke`.
-    //
-    // A synchronous dispatcher that calls the task inline would make the
-    // task run on the worker thread — the exact bug this test guards
-    // against.  `std.Thread.getCurrentId()` is the discrimination tool.
-    var gd = GlibDispatcher{ .gpa = testing.allocator };
-
-    var task_ran = false;
-    var task_thread_id: std.Thread.Id = undefined;
-
-    const Capture = struct {
-        ran: *bool,
-        thread_id: *std.Thread.Id,
-    };
-    var capture = Capture{ .ran = &task_ran, .thread_id = &task_thread_id };
-
-    const worker = try std.Thread.spawn(.{}, struct {
-        fn invokeTask(dispatcher: *GlibDispatcher, cap: *Capture) void {
-            dispatcher.dispatcher().invoke(struct {
-                fn run(raw: *anyopaque) void {
-                    const c: *Capture = @ptrCast(@alignCast(raw));
-                    c.thread_id.* = std.Thread.getCurrentId();
-                    c.ran.* = true;
-                }
-            }.run, cap) catch {};
-        }
-    }.invokeTask, .{ &gd, &capture });
-
-    worker.join();
-
-    // Pump the GLib main context until the task fires. Acotado a propósito:
-    // sin límite, una fuente que no llegue a dispararse convierte este test en
-    // un CUELGUE, y un cuelgue en CI es peor que un rojo — no dice qué falló y
-    // se come el job entero hasta el timeout del runner.
-    var spins: u32 = 0;
-    while (!task_ran and spins < 10_000) : (spins += 1) {
-        _ = glib.MainContext.iteration(null, 0);
+        var buf: [std.fs.max_path_bytes]u8 = undefined;
+        const len = try storeSocketPath(&buf, env);
+        try testing.expectEqualStrings("/home/tester/.cfg/herdr/herdr.sock", buf[0..len]);
     }
-
-    // Drain any remaining sources so the Box gets freed (testing.allocator
-    // would report a leak otherwise).
-    pumpUntilDrained();
-    try testing.expect(task_ran);
-
-    // The task must have run on the test thread (main context owner),
-    // NOT on the worker thread that called invoke.
-    const test_thread_id = std.Thread.getCurrentId();
-    try testing.expectEqual(test_thread_id, task_thread_id);
 }

@@ -229,6 +229,23 @@ fn onActivate(app: *adw.Application, _: ?*anyopaque) callconv(.c) void {
 
     const empty_label = gtk.Label.new(empty_state_text);
     empty_label_ref = empty_label;
+    // `empty_label_ref` es un puntero crudo sin referencia tomada, y el
+    // trampolín que lo usa puede encolarse hasta ~13 s después (lo que tarde
+    // `ensureRunning`). En ese hueco el usuario puede cerrar la ventana: GTK4
+    // destruye la ApplicationWindow en `close-request` y finaliza la label con
+    // ella. Sin esto, la fuente idle escribiría sobre memoria liberada.
+    // Hoy no explota porque el quit de `g_application_release` va a
+    // G_PRIORITY_DEFAULT y gana a G_PRIORITY_DEFAULT_IDLE — pero eso es una
+    // ordenación de prioridades de GLib que nadie verificó, no una garantía
+    // del diseño. Es el mismo razonamiento de "quién posee qué y cuándo" que
+    // se quitó del dispatcher; aquí también se quita.
+    _ = gtk.Widget.signals.destroy.connect(
+        gobject.ext.as(gtk.Widget, empty_label),
+        ?*anyopaque,
+        &onEmptyLabelDestroy,
+        null,
+        .{},
+    );
     gtk.Widget.addCssClass(gobject.ext.as(gtk.Widget, empty_label), "kelpie-empty-label");
     gtk.Widget.setHalign(gobject.ext.as(gtk.Widget, empty_label), .center);
     gtk.Widget.setValign(gobject.ext.as(gtk.Widget, empty_label), .center);
@@ -360,6 +377,11 @@ fn startLinkOnce() void {
     herdr_link.updateStatusLabel = &onStatusLabelUpdate;
 
     link.start(gpa, io, environ_map, &store);
+}
+
+/// La label murió con su ventana: el puntero crudo deja de ser válido.
+fn onEmptyLabelDestroy(_: *gtk.Widget, _: ?*anyopaque) callconv(.c) void {
+    empty_label_ref = null;
 }
 
 /// Called from the herdr_link trampoline (UI thread) once the startup

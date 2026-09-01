@@ -206,10 +206,13 @@ pub const EventsClient = struct {
         // Same heap-ownership-transfer reasoning as `resync()` above.
         const ctx = try self.gpa.create(EventCtx);
         ctx.* = .{ .client = self, .parsed = parsed };
-        self.dispatcher.invoke(eventTrampoline, ctx) catch {
+        self.dispatcher.invoke(eventTrampoline, ctx) catch |err| {
             // errdefer frees `parsed`; we only need to destroy the ctx.
+            // Se propaga el error REAL del dispatcher, no un `OutOfMemory`
+            // fijo: hoy el único que puede llegar es ese, pero devolver una
+            // constante convierte un diagnóstico futuro en una mentira.
             self.gpa.destroy(ctx);
-            return error.OutOfMemory;
+            return err;
         };
     }
 };
