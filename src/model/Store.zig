@@ -621,6 +621,22 @@ fn upsertAgent(self: *Store, pane: types.PaneInfo, allow_create: bool) !void {
         .pane_id = pane.pane_id,
     };
     if (self.agents.getPtr(key)) |existing| {
+        // Al suscribirse, herdr REPRODUCE el historial de cada pane desde
+        // `revision = 1`, y esa ráfaga llega DESPUÉS del `session.snapshot` que
+        // `resync()` acaba de pedir. Sin esta guarda, el replay pisa estado nuevo
+        // con estado viejo: medido contra la sesión real,
+        //     wA:p5  working rev=11  ->  unknown rev=1
+        //     w5:p1  idle    rev=4   ->  unknown rev=1
+        // y el sidebar acababa mostrando el spinner apagado en un agente que sí
+        // trabajaba, y glifo de bloqueado en agentes que estaban en reposo.
+        // Se descarta lo que NO sea estrictamente más nuevo, y el `<=` no es
+        // exceso de celo: el replay llega hasta la MISMA revisión que el
+        // snapshot con un estado distinto —medido: `w5:p1 blocked rev=4` contra
+        // `idle rev=4` del snapshot—, porque `agent_status` puede cambiar sin
+        // que suba `revision` (herdr lleva `state_change_seq` aparte, y el
+        // payload de `pane.updated` no lo incluye). A revisión igual el snapshot
+        // es la fuente buena; a revisión mayor, el evento.
+        if (pane.revision <= existing.revision) return;
         const from_status = existing.status;
         const duped_ws = try self.gpa.dupe(u8, pane.workspace_id);
         self.gpa.free(existing.workspace_id);
@@ -1315,4 +1331,46 @@ test "pane.created for a non-agent pane does not create an agent row" {
     defer ag.deinit();
     try store.applyEvent(.{ .event = .pane_created, .data = ag.value });
     try testing.expectEqual(@as(usize, 1), store.agents.count());
+}
+
+test "una actualizacion de pane mas vieja que la guardada no pisa el estado nuevo" {
+    var store = Store.init(testing.allocator);
+    defer store.deinit();
+
+    // Snapshot: el agente esta trabajando, revision 11.
+    const agents = [_]types.AgentInfo{.{
+        .terminal_id = "t1",
+        .agent_status = .working,
+        .workspace_id = "wA",
+        .tab_id = "wA:t3",
+        .pane_id = "wA:p5",
+        .focused = false,
+        .revision = 11,
+    }};
+    try store.applySnapshot(makeSnapshot(&agents, &.{}, &.{}));
+
+    const key = AgentKey{ .device_id = "local", .pane_id = "wA:p5" };
+    try testing.expectEqual(types.AgentStatus.working, store.agents.get(key).?.status);
+
+    // Llega el replay del historial: revision 1, estado desconocido. Es MAS
+    // VIEJO que lo que ya tenemos, asi que no debe tocar nada.
+    const replay =
+        \\{"pane":{"pane_id":"wA:p5","terminal_id":"t1","workspace_id":"wA","tab_id":"wA:t3","focused":false,"agent_status":"unknown","revision":1}}
+    ;
+    const old_ev = try json.parseFromSlice(json.Value, testing.allocator, replay, .{});
+    defer old_ev.deinit();
+    try store.applyEvent(.{ .event = .pane_updated, .data = old_ev.value });
+
+    try testing.expectEqual(types.AgentStatus.working, store.agents.get(key).?.status);
+    try testing.expectEqual(@as(u64, 11), store.agents.get(key).?.revision);
+
+    // Y una genuinamente mas nueva si se aplica.
+    const fresh_json =
+        \\{"pane":{"pane_id":"wA:p5","terminal_id":"t1","workspace_id":"wA","tab_id":"wA:t3","focused":false,"agent_status":"idle","revision":12}}
+    ;
+    const fresh = try json.parseFromSlice(json.Value, testing.allocator, fresh_json, .{});
+    defer fresh.deinit();
+    try store.applyEvent(.{ .event = .pane_updated, .data = fresh.value });
+
+    try testing.expectEqual(types.AgentStatus.idle, store.agents.get(key).?.status);
 }
