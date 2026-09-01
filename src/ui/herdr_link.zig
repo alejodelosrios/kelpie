@@ -328,6 +328,156 @@ fn pumpUntilDrained() void {
     while (glib.MainContext.iteration(null, 0) != 0) {}
 }
 
+// ---------------------------------------------------------------------------
+// Link lifecycle tests — Gherkin: "cerrar la ventana para los hilos"
+// ---------------------------------------------------------------------------
+
+test "Link.stop(): safe with no prior start() — no thread to join, no crash" {
+    // Scenario: "stop() sin start() previo" (PM's lifecycle ask). `stop()`
+    // must not assume `startup_thread`/`events_client` are populated.
+    var link: Link = .{};
+    link.stop();
+    try testing.expect(link.startup_thread == null);
+}
+
+var link_test_next_id: std.atomic.Value(u32) = .init(0);
+
+fn linkTestSocketPath(buf: *[108]u8) ![]const u8 {
+    return std.fmt.bufPrint(
+        buf,
+        "/tmp/kelpie-herdr-link-{d}-{d}.sock",
+        .{ std.posix.system.getpid(), link_test_next_id.fetchAdd(1, .monotonic) },
+    );
+}
+
+/// Accepts and immediately closes one connection — mirrors
+/// `LocalServer.ensureRunning`'s liveness probe (`tryConnect`), which opens
+/// and closes without exchanging data.
+fn linkAcceptAndClose(server: *std.Io.net.Server, io: std.Io) void {
+    const stream = server.accept(io) catch return;
+    stream.close(io);
+}
+
+const link_snapshot_json = "{\"result\":{\"snapshot\":{\"version\":\"1\",\"protocol\":20,\"workspaces\":[],\"tabs\":[],\"panes\":[],\"layouts\":[],\"agents\":[]}}}\n";
+
+/// Fake herdr: probe (accept+close) → subscribe (ack) → resync (snapshot) →
+/// close, so `EventsClient`'s reader thread lands on a real, deterministic
+/// reconnect-backoff loop afterwards (same as a real herdr that hung up).
+fn fakeHerdrServerThread(server: *std.Io.net.Server, io: std.Io) void {
+    linkAcceptAndClose(server, io); // ensureRunning's tryConnect probe
+
+    const sub_stream = server.accept(io) catch return; // subscribe
+    var read_buf: [4096]u8 = undefined;
+    var reader = sub_stream.reader(io, &read_buf);
+    _ = reader.interface.takeDelimiterInclusive('\n') catch {};
+    {
+        var write_buf: [4096]u8 = undefined;
+        var writer = sub_stream.writer(io, &write_buf);
+        writer.interface.writeAll("{\"result\":{\"type\":\"subscription_started\"}}\n") catch {};
+        writer.interface.flush() catch {};
+    }
+
+    const resync_stream = server.accept(io) catch {
+        sub_stream.close(io);
+        return;
+    };
+    var resync_read_buf: [4096]u8 = undefined;
+    var resync_reader = resync_stream.reader(io, &resync_read_buf);
+    _ = resync_reader.interface.takeDelimiterInclusive('\n') catch {};
+    {
+        var write_buf: [4096]u8 = undefined;
+        var writer = resync_stream.writer(io, &write_buf);
+        writer.interface.writeAll(link_snapshot_json) catch {};
+        writer.interface.flush() catch {};
+    }
+    resync_stream.close(io);
+    sub_stream.close(io);
+}
+
+test "Link: start() then immediate stop() joins the startup thread without hanging" {
+    // Scenario: "stop() con el hilo de arranque a medias" — `stop()` right
+    // after `start()`, racing the `stopping` check at the top of
+    // `startupThreadFn`. Points HERDR_SOCKET_PATH at an already-listening
+    // fake socket so `ensureRunning`'s first probe takes the `.connected`
+    // fast path (no 10s launch window) regardless of which side of the race
+    // this lands on.
+    var path_buf: [108]u8 = undefined;
+    const path = try linkTestSocketPath(&path_buf);
+    const addr = try std.Io.net.UnixAddress.init(path);
+    var server = try addr.listen(testing.io, .{});
+    defer std.Io.Dir.deleteFileAbsolute(testing.io, path) catch {};
+
+    const server_thread = try std.Thread.spawn(.{}, fakeHerdrServerThread, .{ &server, testing.io });
+    defer server_thread.join();
+    defer server.deinit(testing.io);
+
+    var env = std.process.Environ.Map.init(testing.allocator);
+    defer env.deinit();
+    try env.put("HERDR_SOCKET_PATH", path);
+
+    var store = Store.init(testing.allocator);
+    defer store.deinit();
+
+    var link: Link = .{};
+    const start = std.Io.Timestamp.now(testing.io, .awake);
+    link.start(testing.allocator, testing.io, &env, &store);
+    link.stop();
+    const elapsed = start.durationTo(std.Io.Timestamp.now(testing.io, .awake));
+
+    try testing.expect(link.startup_thread == null);
+    // Regression guard: a stop() that has to wait out ensureRunning's ~10s
+    // launch window (or a hang) would blow way past this.
+    try testing.expect(elapsed.nanoseconds < 5 * std.time.ns_per_s);
+
+    // Drain whatever the dispatcher queued on the default main context
+    // (status publish, maybe a resync) before the test allocator checks for
+    // leaks — same requirement as every other test in this file.
+    pumpUntilDrained();
+}
+
+test "Link: full start → resync via fake herdr → stop() joins and drains cleanly, no leak" {
+    // Scenario: "cerrar la ventana para los hilos" — full happy path. Proves
+    // the startup thread hands off to a real EventsClient, the dispatcher
+    // hands its status-publish and resync tasks to the (pumped) glib main
+    // context, and stop() joins both threads without leaking anything under
+    // `testing.allocator`.
+    var path_buf: [108]u8 = undefined;
+    const path = try linkTestSocketPath(&path_buf);
+    const addr = try std.Io.net.UnixAddress.init(path);
+    var server = try addr.listen(testing.io, .{});
+    defer std.Io.Dir.deleteFileAbsolute(testing.io, path) catch {};
+
+    const server_thread = try std.Thread.spawn(.{}, fakeHerdrServerThread, .{ &server, testing.io });
+    defer server_thread.join();
+    defer server.deinit(testing.io);
+
+    var env = std.process.Environ.Map.init(testing.allocator);
+    defer env.deinit();
+    try env.put("HERDR_SOCKET_PATH", path);
+
+    var store = Store.init(testing.allocator);
+    defer store.deinit();
+
+    var link: Link = .{};
+    link.start(testing.allocator, testing.io, &env, &store);
+
+    // Pump the default main context so the queued status-publish and resync
+    // trampolines actually run (idleAddOnce only queues — nothing drains it
+    // but a pumped loop). Bounded, same reasoning as the dispatcher test
+    // above: an unbounded pump turns a stuck source into a CI hang instead
+    // of a red test.
+    var spins: u32 = 0;
+    while (spins < 1_000) : (spins += 1) {
+        _ = glib.MainContext.iteration(null, 0);
+        std.Io.sleep(testing.io, .fromMilliseconds(2), .awake) catch {};
+    }
+
+    link.stop();
+    pumpUntilDrained();
+
+    try testing.expect(link.startup_thread == null);
+}
+
 test "GlibDispatcher: task runs on the main-context thread, not the caller" {
     // Proves the dispatcher actually hands off to the GLib main context:
     // the task must run on whichever thread pumps the main context (here,
