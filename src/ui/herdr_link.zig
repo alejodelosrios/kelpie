@@ -100,6 +100,20 @@ pub const Link = struct {
     /// instead of blocking on `ensureRunning` or `EventsClient.start`.
     stopping: std.atomic.Value(bool) = .init(false),
 
+    /// Debounce flag for resync scheduling.  Both `onEvent` and the
+    /// `debounceFired` callback run on the UI thread (by construction:
+    /// GLib trampoline), so no atomic is needed.  If someone "fixes" this
+    /// to use an atomic, they're wrong — the single-thread guarantee
+    /// comes from the GLib main context, not from the flag type.
+    resync_scheduled: bool = false,
+
+    /// GLib source ID of the pending debounce timeout, if any.
+    /// Stored so `stop()` can cancel it — otherwise `debounceFired`
+    /// would fire on a freed Link (same use-after-free that the test
+    /// exposed).  `glib.timeoutAddOnce` returns `c_uint`; 0 means no
+    /// source pending (GLib source IDs are always > 0).
+    resync_source_id: ?c_uint = null,
+
     /// Resolve the socket, spawn a startup thread that calls
     /// `ensureRunning` (may block ~10 s) then `EventsClient.start()`.
     /// The startup thread publishes `Status.kind` to the UI via the
@@ -132,6 +146,20 @@ pub const Link = struct {
     /// shutdown+join on its reader thread).
     pub fn stop(self: *Link) void {
         self.stopping.store(true, .release);
+
+        // Cancel a pending debounce timeout if one is armed.  Otherwise
+        // `debounceFired` would fire on a freed or restarting Link — the
+        // same use-after-free that crashed the test suite.  We cancel the
+        // GLib source rather than using a `stopping` flag because a flag
+        // only protects against "don't touch fields" — the source itself
+        // would still fire and the pointer it carries would still dangle.
+        // `glib.Source.remove` is `g_source_remove` (glib2.zig:9913).
+        if (self.resync_source_id) |id| {
+            _ = glib.Source.remove(id);
+            self.resync_source_id = null;
+            self.resync_scheduled = false;
+        }
+
         if (self.startup_thread) |t| {
             // ponytail: este join bloquea el hilo de UI, y el techo son ~28 s,
             // no los ~13 que decía antes de que el auditor sumara el otro tramo:
@@ -245,6 +273,43 @@ fn onEvent(ctx: *anyopaque, envelope: types.EventEnvelope) void {
     store.applyEvent(envelope) catch |err| {
         std.log.err("herdr_link: applyEvent failed: {t}", .{err});
     };
+    // #84: schedule a debounced resync so the snapshot becomes the
+    // source of truth for agent_status.  The debounce coalesces N
+    // events in the 100 ms window into one `session.snapshot` call.
+    _ = scheduleResync(link);
+}
+
+/// Decide whether to schedule a resync.  Pure: only touches the flag,
+/// no GLib side effects.  Tests call this instead of `scheduleResync`
+/// so they never arm a real timer.
+fn shouldSchedule(link: *Link) bool {
+    if (link.resync_scheduled) return false;
+    link.resync_scheduled = true;
+    return true;
+}
+
+/// Schedule a debounced resync if one isn't already pending.
+/// Returns `true` if a new timeout was scheduled, `false` if one was
+/// already pending (coalescence).  Extracted from `onEvent` so tests
+/// can exercise the decision logic without a GLib main loop.
+fn scheduleResync(link: *Link) bool {
+    if (!shouldSchedule(link)) return false;
+    link.resync_source_id = glib.timeoutAddOnce(100, &debounceFired, link);
+    return true;
+}
+
+/// `glib.SourceOnceFunc` (glib2.zig:25660): returns void — a "once"
+/// source removes itself, no `G_SOURCE_REMOVE` to return.
+///
+/// Order matters: clear `resync_scheduled` BEFORE requesting the resync,
+/// so that an event arriving during the resync can schedule the next one.
+fn debounceFired(data: ?*anyopaque) callconv(.c) void {
+    const link: *Link = @ptrCast(@alignCast(data.?));
+    link.resync_source_id = null;
+    link.resync_scheduled = false;
+    if (link.events_client) |*ec| {
+        ec.requestResync();
+    }
 }
 
 fn onResynced(ctx: *anyopaque, snapshot: types.SessionSnapshot) void {
@@ -480,4 +545,41 @@ test "GlibDispatcher: task runs on the main-context thread, not the caller" {
     // NOT on the worker thread that called invoke.
     const test_thread_id = std.Thread.getCurrentId();
     try testing.expectEqual(test_thread_id, task_thread_id);
+}
+
+test "debounce: dos eventos seguidos programan un solo timeout" {
+    // #84: exercises the debounce decision logic without a GLib main
+    // loop.  `shouldSchedule` is the pure decision; `scheduleResync` is
+    // the effect (arms a GLib timer).  This test calls `shouldSchedule`
+    // ONLY, never `scheduleResync`, because arming a real GLib timer
+    // would register a callback pointing at this stack-allocated `Link`.
+    // When the test ends, `link` dies, but the timer stays armed.  Later
+    // tests pump the main context (`pumpUntilDrained`), the orphaned
+    // timer fires, `debounceFired` dereferences the dead pointer, and
+    // the suite crashes at herdr_link.zig:281 — the same use-after-free
+    // that `stop()` now prevents in production by cancelling the source.
+    //
+    // This is the THIRD time this file trips on GLib timers outliving
+    // stack-allocated test state (see lines 379-391 for the first two).
+    // The rule: if your test doesn't need a GLib main loop, don't touch
+    // one.  Test the pure logic; leave the timer wiring to integration.
+    var link: Link = .{};
+
+    // First call: must schedule (returns true), flag must be set.
+    try testing.expect(shouldSchedule(&link));
+    try testing.expect(link.resync_scheduled);
+
+    // Second call immediately: must NOT schedule (returns false),
+    // flag still set — coalescence.
+    try testing.expect(!shouldSchedule(&link));
+    try testing.expect(link.resync_scheduled);
+
+    // Simulate the debounce firing: clear the flag, as debounceFired does.
+    link.resync_scheduled = false;
+    try testing.expect(!link.resync_scheduled);
+
+    // Now a third call must schedule again — the previous debounce
+    // cycle is complete.
+    try testing.expect(shouldSchedule(&link));
+    try testing.expect(link.resync_scheduled);
 }
