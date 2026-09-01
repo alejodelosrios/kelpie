@@ -99,7 +99,16 @@ Un único `gtk.SignalListItemFactory` para las tres clases de fila; `bind` decid
 |---|---|---|---|
 | `.device` | 30 px | `kelpie-row-device` | label del nombre del dispositivo |
 | `.workspace` | 30 px | `kelpie-row-workspace` | label + `AgentStatusGlyph` agregado |
-| `.agent` | 28 px | `kelpie-row-agent` | título 13 medium + subtítulo 11.5 (`agente · cwd`) + glifo |
+| `.agent` | 28 px **mínimos** | `kelpie-row-agent` | título 13 medium + subtítulo 11.5 (`agente · cwd`) + glifo |
+
+**Enmienda del gate visual (2026-08-31, aprobada por el humano):** el CSS fija `min-height`, no
+`height`, y la fila de agente lleva **dos líneas** (13 px + 11.5 px), que con interlineado normal ya
+pasan de 28. Medido sobre captura, la fila renderizada ronda los 36 px lógicos. El criterio 2 del
+issue decía "agentes 28 px" sin contar con eso. Se deja la fila como está —el humano la vio y la
+aprobó— y el criterio se lee ahora: **`min-height` de 28 px (agente) y 30 px (espacio/dispositivo);
+la fila de agente crece lo que necesite para las dos líneas**. Apretar el interlineado para forzar
+28 px se descartó explícitamente: comprime la legibilidad del subtítulo a cambio de cumplir una cifra
+que se eligió antes de saber que la fila era de dos líneas.
 
 `AgentStatusGlyph` no es una clase GObject: es una función que puebla un `gtk.Box` contenedor de
 ancho fijo. Criterio 3 ("el spinner solo existe mientras el estado es `working`, no hay widget
