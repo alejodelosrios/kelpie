@@ -139,6 +139,11 @@ pub const Store = struct {
     workspaces: WorkspaceMap,
     tabs: TabMap,
     observers: std.array_list.Managed(ChangeObserver),
+    /// Fingerprint of the last applied snapshot's sidebar-relevant fields.
+    /// Used by `applySnapshot` to skip mutation and `fireChanged` when the
+    /// snapshot hasn't changed anything the sidebar paints. `null` means
+    /// "no snapshot applied yet" — the first snapshot always applies.
+    last_fingerprint: ?u64 = null,
 
     pub fn init(gpa: std.mem.Allocator) Store {
         return .{
@@ -169,6 +174,31 @@ pub const Store = struct {
     // -----------------------------------------------------------------------
 
     pub fn applySnapshot(self: *Store, snapshot: types.SessionSnapshot) !void {
+        // #84: Fingerprint-based no-op guard. If the snapshot hasn't changed
+        // anything the sidebar paints, skip mutation and fireChanged entirely.
+        // This prevents the churn of ~1 reconstruction/second when herdr
+        // emits events (pane.updated ~1/s in idle) that don't change the
+        // sidebar's view.
+        //
+        // The fingerprint is computed BEFORE mutation. We null out
+        // `last_fingerprint` immediately so that if mutation fails midway
+        // (e.g. OOM on gpa.dupe), the next snapshot — identical or not —
+        // won't be incorrectly discarded by the guard. The final assignment
+        // `self.last_fingerprint = fp` only runs if the whole mutation
+        // succeeds.
+        //
+        // Risk: if `buildRows` (src/ui/sidebar.zig) starts painting a new
+        // field and nobody adds it to `computeFingerprint`, the sidebar goes
+        // stale silently. Test scenarios 7/8 pin both directions.
+        const fp = computeFingerprint(snapshot);
+        if (self.last_fingerprint) |last| {
+            if (fp == last) return; // No-op: nothing sidebar-relevant changed
+        }
+
+        // Null out before any destructive mutation so a midway failure
+        // doesn't leave a stale fingerprint that blocks the next snapshot.
+        self.last_fingerprint = null;
+
         // Agents
         freeAgentEntries(self.gpa, &self.agents);
         self.agents.clearAndFree();
@@ -227,6 +257,11 @@ pub const Store = struct {
             }
             try self.tabs.put(key, try dupeTabInfo(self.gpa, tab));
         }
+
+        // Mutation succeeded: commit the fingerprint. If we get here via
+        // an error, last_fingerprint is already null (set above), so the
+        // next snapshot will be applied instead of incorrectly discarded.
+        self.last_fingerprint = fp;
 
         fireChanged(&self.observers);
     }
@@ -544,6 +579,76 @@ pub const Store = struct {
         std.sort.block(*const Agent, list.items, {}, lessThan);
         return list;
     }
+
+    /// Computes a fingerprint of the snapshot's sidebar-relevant fields.
+    /// The fingerprint is order-independent (uses wrapping addition to combine
+    /// per-row hashes) so that iteration order differences don't cause false
+    /// mismatches.
+    ///
+    /// Fields included: everything the sidebar paints (see `buildRows` in
+    /// `src/ui/sidebar.zig`). Excluded on purpose: `revision` (changes with
+    /// every byte of terminal output — exactly the noise we're filtering) and
+    /// `terminal_title` (changes with the prompt; `terminal_title_stripped`
+    /// is included because the sidebar paints it in the subtitle).
+    ///
+    /// Risk declared: if `buildRows` starts painting a new field and nobody
+    /// adds it here, the sidebar goes stale silently. The test scenarios
+    /// "applySnapshot: un snapshot con la misma huella no dispara onChanged"
+    /// and "applySnapshot: un cambio de agent_status SÍ dispara onChanged"
+    /// pin both directions.
+    pub fn computeFingerprint(snapshot: types.SessionSnapshot) u64 {
+        var combined: u64 = 0;
+
+        // Agents
+        for (snapshot.agents) |info| {
+            var h = std.hash.Wyhash.init(0);
+            h.update(info.pane_id);
+            h.update(&[_]u8{0});
+            h.update(std.mem.asBytes(&info.agent_status));
+            h.update(&[_]u8{0});
+            h.update(info.workspace_id);
+            h.update(&[_]u8{0});
+            h.update(info.tab_id);
+            h.update(&[_]u8{0});
+            h.update(std.mem.asBytes(&info.focused));
+            h.update(&[_]u8{0});
+            h.update(std.mem.asBytes(&info.state_change_seq));
+            h.update(&[_]u8{0});
+            h.update(info.agent orelse "");
+            h.update(&[_]u8{0});
+            h.update(info.display_agent orelse "");
+            h.update(&[_]u8{0});
+            h.update(info.title orelse "");
+            h.update(&[_]u8{0});
+            h.update(info.terminal_title_stripped orelse "");
+            h.update(&[_]u8{0});
+            h.update(info.cwd orelse "");
+            h.update(&[_]u8{0});
+            combined +%= h.final();
+        }
+
+        // Workspaces
+        for (snapshot.workspaces) |ws| {
+            var h = std.hash.Wyhash.init(0);
+            h.update(ws.workspace_id);
+            h.update(&[_]u8{0});
+            h.update(ws.label);
+            h.update(&[_]u8{0});
+            h.update(std.mem.asBytes(&ws.number));
+            h.update(&[_]u8{0});
+            h.update(std.mem.asBytes(&ws.focused));
+            h.update(&[_]u8{0});
+            h.update(std.mem.asBytes(&ws.agent_status));
+            h.update(&[_]u8{0});
+            combined +%= h.final();
+        }
+
+        // Number of rows (agents + workspaces) as a tiebreaker
+        combined +%= snapshot.agents.len;
+        combined +%= snapshot.workspaces.len;
+
+        return combined;
+    }
 };
 
 // ---------------------------------------------------------------------------
@@ -621,40 +726,53 @@ fn upsertAgent(self: *Store, pane: types.PaneInfo) !void {
         .pane_id = pane.pane_id,
     };
     if (self.agents.getPtr(key)) |existing| {
-        // Al suscribirse, herdr reproduce el historial de cada pane desde
-        // `revision = 1`, y esa ráfaga llega DESPUÉS del `session.snapshot`.
-        // Medido contra la sesión real, degradaba lo bueno a nada:
-        //     wA:p5  working rev=11  ->  unknown rev=1
+        // #84: upsertAgent deja de ser fuente de `agent_status`. La verdad
+        // viene de `session.snapshot` (vía `applySnapshot`), no de los
+        // eventos de pane. Los eventos de pane son solo SEÑAL de que algo
+        // cambió — el resync con debounce pide el snapshot y `applySnapshot`
+        // aplica el estado real.
         //
-        // La guarda ataca ESO y solo eso: un agente que ya conocemos no vuelve
-        // a `unknown` por un evento de pane. `unknown` es "este pane no aloja
-        // un agente", y un pane que ya demostró alojar uno no deja de hacerlo
-        // porque llegue una trama vieja.
+        // Medido contra la sesión real (herdr 0.8.2, 14 panes / 7 agentes):
+        // ~1 evento/s en reposo, y 30 de 30 eventos en vivo NO cambiaron
+        // nada que el sidebar pinte. Cada `fireChanged` dispara
+        // `Sidebar.refresh()` → `gio.ListStore.splice(0, old_n, ...)`
+        // (src/ui/sidebar.zig:364), que reconstruye TODAS las filas.
+        // Sin esta guarda, el issue entrega una reconstrucción completa del
+        // sidebar una vez por segundo, para siempre.
         //
-        // Lo que NO se hace es comparar `revision`: se probó y rompió las
-        // actualizaciones en vivo, porque `agent_status` cambia SIN que
-        // `revision` suba —herdr lleva `state_change_seq` aparte y el payload
-        // de `pane.updated` no lo incluye—. Descartar por revisión descartaba
-        // justo los cambios de estado, que es lo único que este issue existe
-        // para transmitir.
-        const incoming_status = if (pane.agent_status == .unknown and existing.status != .unknown)
-            existing.status
-        else
-            pane.agent_status;
-        const from_status = existing.status;
-        const duped_ws = try self.gpa.dupe(u8, pane.workspace_id);
-        self.gpa.free(existing.workspace_id);
-        existing.workspace_id = duped_ws;
-        const duped_tab = try self.gpa.dupe(u8, pane.tab_id);
-        self.gpa.free(existing.tab_id);
-        existing.tab_id = duped_tab;
-        existing.status = incoming_status;
-        existing.revision = pane.revision;
-        existing.focused = pane.focused;
-        if (from_status != incoming_status) {
-            fireTransition(&self.observers, existing, from_status, incoming_status);
+        // Solo disparamos `fireChanged` si cambió algo estructural que el
+        // sidebar pinta: workspace_id, tab_id o focused. `revision` es ruido
+        // puro de salida del terminal y no merece un repintado.
+        var changed = false;
+
+        // Compare workspace_id before overwriting
+        if (!std.mem.eql(u8, existing.workspace_id, pane.workspace_id)) {
+            const duped_ws = try self.gpa.dupe(u8, pane.workspace_id);
+            self.gpa.free(existing.workspace_id);
+            existing.workspace_id = duped_ws;
+            changed = true;
         }
-        fireChanged(&self.observers);
+
+        // Compare tab_id before overwriting
+        if (!std.mem.eql(u8, existing.tab_id, pane.tab_id)) {
+            const duped_tab = try self.gpa.dupe(u8, pane.tab_id);
+            self.gpa.free(existing.tab_id);
+            existing.tab_id = duped_tab;
+            changed = true;
+        }
+
+        // Compare focused before overwriting
+        if (existing.focused != pane.focused) {
+            existing.focused = pane.focused;
+            changed = true;
+        }
+
+        // Always update revision (it's cheap and useful for ordering)
+        existing.revision = pane.revision;
+
+        if (changed) {
+            fireChanged(&self.observers);
+        }
     }
     // Antes había aquí una rama que CREABA el agente desde un evento de pane.
     // Se quitó: el payload de `pane.created`/`pane.updated` no trae `agent`,
@@ -902,7 +1020,9 @@ test "transition reorders and notifies exactly once" {
     // applySnapshot fires onChanged once
     try testing.expectEqual(@as(u32, 1), obs.changed_count);
 
-    // Build a pane_updated event that changes p1 to blocked.
+    // #84: pane_updated no longer changes status. The test now verifies
+    // that upsertAgent does NOT fire a transition — the truth comes from
+    // session.snapshot via applySnapshot.
     const event_json =
         \\{"pane":{"pane_id":"p1","terminal_id":"t1","workspace_id":"w1","tab_id":"tab1","focused":false,"agent_status":"blocked","revision":11}}
     ;
@@ -911,15 +1031,17 @@ test "transition reorders and notifies exactly once" {
     const envelope = types.EventEnvelope{ .event = .pane_updated, .data = parsed.value };
     try store.applyEvent(envelope);
 
-    // onTransition fired exactly once with working -> blocked
-    try testing.expectEqual(@as(u32, 1), obs.transition_count);
-    try testing.expectEqual(types.AgentStatus.working, obs.last_transition_from);
-    try testing.expectEqual(types.AgentStatus.blocked, obs.last_transition_to);
+    // onTransition did NOT fire — upsertAgent no longer changes status
+    try testing.expectEqual(@as(u32, 0), obs.transition_count);
 
-    // orderedAgents: p1 is now first (blocked, rev 11)
+    // Status unchanged
+    const key = AgentKey{ .device_id = "local", .pane_id = "p1" };
+    try testing.expectEqual(types.AgentStatus.working, store.agents.get(key).?.status);
+
+    // orderedAgents: p1 is still working (not blocked)
     var ordered = try store.orderedAgents(testing.allocator);
     defer ordered.deinit();
-    try testing.expectEqual(types.AgentStatus.blocked, ordered.items[0].status);
+    try testing.expectEqual(types.AgentStatus.working, ordered.items[0].status);
     try testing.expectEqualStrings("p1", ordered.items[0].pane_id);
 }
 
@@ -1053,7 +1175,7 @@ test "no leaks: applySnapshot -> applyEvent -> deinit under testing.allocator" {
     }};
     try store.applySnapshot(makeSnapshot(&agents, &workspaces, &tabs));
 
-    // pane_updated p1 -> blocked
+    // pane_updated p1 — #84: no longer changes status
     const ev1_json =
         \\{"pane":{"pane_id":"p1","terminal_id":"t1","workspace_id":"w1","tab_id":"tab1","focused":false,"agent_status":"blocked","revision":3}}
     ;
@@ -1093,13 +1215,14 @@ test "no leaks: applySnapshot -> applyEvent -> deinit under testing.allocator" {
     defer ev5.deinit();
     try store.applyEvent(.{ .event = .tab_focused, .data = ev5.value });
 
-    // Estado final: 1 agente. `p1` sigue (el snapshot lo trajo) y pasó a
-    // blocked; `p2` se cerró; y `p3` NO entra, porque un evento de pane ya no
-    // crea agentes — no trae su identidad.
+    // Estado final: 1 agente. `p1` sigue (el snapshot lo trajo) y su status
+    // NO cambió por pane.updated (#84); `p2` se cerró; y `p3` NO entra,
+    // porque un evento de pane ya no crea agentes — no trae su identidad.
     var ordered = try store.orderedAgents(testing.allocator);
     defer ordered.deinit();
     try testing.expectEqual(@as(usize, 1), ordered.items.len);
-    try testing.expectEqual(types.AgentStatus.blocked, ordered.items[0].status);
+    // #84: status unchanged — upsertAgent no longer touches it
+    try testing.expectEqual(types.AgentStatus.working, ordered.items[0].status);
     try testing.expectEqualStrings("p1", ordered.items[0].pane_id);
 
     // Workspace renamed
@@ -1356,17 +1479,255 @@ test "el replay no degrada a unknown, pero un cambio de estado real SI se aplica
     try store.applyEvent(.{ .event = .pane_updated, .data = old_ev.value });
     try testing.expectEqual(types.AgentStatus.working, store.agents.get(key).?.status);
 
-    // 2) Y la otra mitad, que es la que importa para el criterio 3: un cambio
-    //    de estado real SÍ se aplica **aunque la revisión no suba**. herdr
-    //    cambia `agent_status` sin tocar `revision` (lleva `state_change_seq`
-    //    aparte, que el payload de `pane.updated` no incluye), así que
-    //    descartar por revisión congelaba el sidebar — se probó y rompió las
-    //    actualizaciones en vivo.
+    // 2) #84: upsertAgent ya NO es fuente de estado. Un pane.updated que
+    //    cambia agent_status NO modifica el status del agente en el Store.
+    //    La verdad viene de session.snapshot vía applySnapshot.
     const change =
         \\{"pane":{"pane_id":"wA:p5","terminal_id":"t1","workspace_id":"wA","tab_id":"wA:t3","focused":false,"agent_status":"blocked","revision":11}}
     ;
     const ev = try json.parseFromSlice(json.Value, testing.allocator, change, .{});
     defer ev.deinit();
     try store.applyEvent(.{ .event = .pane_updated, .data = ev.value });
+    // Status unchanged — upsertAgent no longer touches it
+    try testing.expectEqual(types.AgentStatus.working, store.agents.get(key).?.status);
+}
+
+// ---------------------------------------------------------------------------
+// #84: New tests — exact names from the design
+// ---------------------------------------------------------------------------
+
+test "upsertAgent: un pane.updated NO cambia el status del agente" {
+    var store = Store.init(testing.allocator);
+    defer store.deinit();
+
+    const agents = [_]types.AgentInfo{makeAgentInfo("p1", .working, 10)};
+    try store.applySnapshot(makeSnapshot(&agents, &.{}, &.{}));
+
+    const key = AgentKey{ .device_id = "local", .pane_id = "p1" };
+    try testing.expectEqual(types.AgentStatus.working, store.agents.get(key).?.status);
+
+    // pane_updated with different agent_status
+    const event_json =
+        \\{"pane":{"pane_id":"p1","terminal_id":"t1","workspace_id":"w1","tab_id":"tab1","focused":false,"agent_status":"blocked","revision":11}}
+    ;
+    const parsed = try json.parseFromSlice(json.Value, testing.allocator, event_json, .{});
+    defer parsed.deinit();
+    try store.applyEvent(.{ .event = .pane_updated, .data = parsed.value });
+
+    // Status must NOT change — upsertAgent is no longer a source of status
+    try testing.expectEqual(types.AgentStatus.working, store.agents.get(key).?.status);
+}
+
+test "upsertAgent: un pane.updated SI actualiza workspace/tab/focused" {
+    var store = Store.init(testing.allocator);
+    defer store.deinit();
+
+    const agents = [_]types.AgentInfo{.{
+        .terminal_id = "t1",
+        .agent_status = .working,
+        .workspace_id = "w1",
+        .tab_id = "tab1",
+        .pane_id = "p1",
+        .focused = false,
+        .revision = 10,
+    }};
+    try store.applySnapshot(makeSnapshot(&agents, &.{}, &.{}));
+
+    const key = AgentKey{ .device_id = "local", .pane_id = "p1" };
+    try testing.expectEqualStrings("w1", store.agents.get(key).?.workspace_id);
+    try testing.expectEqualStrings("tab1", store.agents.get(key).?.tab_id);
+    try testing.expect(!store.agents.get(key).?.focused);
+
+    // pane_updated with different workspace, tab, and focused
+    const event_json =
+        \\{"pane":{"pane_id":"p1","terminal_id":"t1","workspace_id":"w2","tab_id":"tab2","focused":true,"agent_status":"working","revision":11}}
+    ;
+    const parsed = try json.parseFromSlice(json.Value, testing.allocator, event_json, .{});
+    defer parsed.deinit();
+    try store.applyEvent(.{ .event = .pane_updated, .data = parsed.value });
+
+    // Structural fields must update
+    try testing.expectEqualStrings("w2", store.agents.get(key).?.workspace_id);
+    try testing.expectEqualStrings("tab2", store.agents.get(key).?.tab_id);
+    try testing.expect(store.agents.get(key).?.focused);
+    // Status unchanged
+    try testing.expectEqual(types.AgentStatus.working, store.agents.get(key).?.status);
+}
+
+test "upsertAgent: un pane.updated que solo cambia revision NO dispara onChanged" {
+    var store = Store.init(testing.allocator);
+    defer store.deinit();
+
+    var obs = TestObserver{};
+    try store.addObserver(obs.observer());
+
+    const agents = [_]types.AgentInfo{makeAgentInfo("p1", .working, 10)};
+    try store.applySnapshot(makeSnapshot(&agents, &.{}, &.{}));
+    const changed_before = obs.changed_count;
+
+    // pane_updated with only revision changed (same workspace, tab, focused)
+    const event_json =
+        \\{"pane":{"pane_id":"p1","terminal_id":"t1","workspace_id":"w1","tab_id":"tab1","focused":false,"agent_status":"working","revision":11}}
+    ;
+    const parsed = try json.parseFromSlice(json.Value, testing.allocator, event_json, .{});
+    defer parsed.deinit();
+    try store.applyEvent(.{ .event = .pane_updated, .data = parsed.value });
+
+    // onChanged must NOT fire — only revision changed, which is terminal output noise
+    try testing.expectEqual(changed_before, obs.changed_count);
+}
+
+test "applySnapshot: un snapshot con la misma huella no dispara onChanged" {
+    var store = Store.init(testing.allocator);
+    defer store.deinit();
+
+    var obs = TestObserver{};
+    try store.addObserver(obs.observer());
+
+    const agents = [_]types.AgentInfo{
+        makeAgentInfo("p1", .working, 10),
+        makeAgentInfo("p2", .idle, 5),
+    };
+    const workspaces = [_]types.WorkspaceInfo{.{
+        .workspace_id = "w1",
+        .number = 1,
+        .label = "main",
+        .focused = true,
+        .pane_count = 2,
+        .tab_count = 1,
+        .active_tab_id = "tab1",
+        .agent_status = .working,
+    }};
+    try store.applySnapshot(makeSnapshot(&agents, &workspaces, &.{}));
+    try testing.expectEqual(@as(u32, 1), obs.changed_count);
+
+    // Apply the exact same snapshot again
+    try store.applySnapshot(makeSnapshot(&agents, &workspaces, &.{}));
+
+    // onChanged must NOT fire a second time — fingerprint is identical
+    try testing.expectEqual(@as(u32, 1), obs.changed_count);
+}
+
+test "applySnapshot: revision distinta no cuenta como cambio" {
+    var store = Store.init(testing.allocator);
+    defer store.deinit();
+
+    var obs = TestObserver{};
+    try store.addObserver(obs.observer());
+
+    const agents1 = [_]types.AgentInfo{
+        makeAgentInfo("p1", .working, 10),
+    };
+    try store.applySnapshot(makeSnapshot(&agents1, &.{}, &.{}));
+    try testing.expectEqual(@as(u32, 1), obs.changed_count);
+
+    // Same agent, same status, but different revision (terminal output)
+    const agents2 = [_]types.AgentInfo{
+        makeAgentInfo("p1", .working, 11),
+    };
+    try store.applySnapshot(makeSnapshot(&agents2, &.{}, &.{}));
+
+    // onChanged must NOT fire — revision is excluded from fingerprint
+    try testing.expectEqual(@as(u32, 1), obs.changed_count);
+}
+
+test "applySnapshot: un cambio de agent_status SI dispara onChanged" {
+    var store = Store.init(testing.allocator);
+    defer store.deinit();
+
+    var obs = TestObserver{};
+    try store.addObserver(obs.observer());
+
+    const agents1 = [_]types.AgentInfo{
+        makeAgentInfo("p1", .working, 10),
+    };
+    try store.applySnapshot(makeSnapshot(&agents1, &.{}, &.{}));
+    try testing.expectEqual(@as(u32, 1), obs.changed_count);
+
+    // Same agent but different status
+    const agents2 = [_]types.AgentInfo{
+        makeAgentInfo("p1", .blocked, 10),
+    };
+    try store.applySnapshot(makeSnapshot(&agents2, &.{}, &.{}));
+
+    // onChanged must fire — agent_status changed
+    try testing.expectEqual(@as(u32, 2), obs.changed_count);
+    const key = AgentKey{ .device_id = "local", .pane_id = "p1" };
     try testing.expectEqual(types.AgentStatus.blocked, store.agents.get(key).?.status);
+}
+
+test "applySnapshot: un cambio de titulo/label SI dispara onChanged" {
+    var store = Store.init(testing.allocator);
+    defer store.deinit();
+
+    var obs = TestObserver{};
+    try store.addObserver(obs.observer());
+
+    const agents1 = [_]types.AgentInfo{.{
+        .terminal_id = "t1",
+        .agent_status = .working,
+        .workspace_id = "w1",
+        .tab_id = "tab1",
+        .pane_id = "p1",
+        .focused = false,
+        .revision = 10,
+        .title = "old title",
+    }};
+    try store.applySnapshot(makeSnapshot(&agents1, &.{}, &.{}));
+    try testing.expectEqual(@as(u32, 1), obs.changed_count);
+
+    // Same agent but different title
+    const agents2 = [_]types.AgentInfo{.{
+        .terminal_id = "t1",
+        .agent_status = .working,
+        .workspace_id = "w1",
+        .tab_id = "tab1",
+        .pane_id = "p1",
+        .focused = false,
+        .revision = 10,
+        .title = "new title",
+    }};
+    try store.applySnapshot(makeSnapshot(&agents2, &.{}, &.{}));
+
+    // onChanged must fire — title changed
+    try testing.expectEqual(@as(u32, 2), obs.changed_count);
+    const key = AgentKey{ .device_id = "local", .pane_id = "p1" };
+    try testing.expectEqualStrings("new title", store.agents.get(key).?.title.?);
+}
+
+test "computeFingerprint: campos adyacentes no se concatenan" {
+    // Two snapshots where adjacent text fields are split differently:
+    //   snapshot A: workspace_id="ab", tab_id="c"
+    //   snapshot B: workspace_id="a",  tab_id="bc"
+    // Without per-field separators these produce the same hash because
+    // the byte sequences "ab" ++ "c" and "a" ++ "bc" are identical.
+    // workspace_id and tab_id are adjacent in the hash (no non-text field
+    // between them).
+
+    const agents_a = [_]types.AgentInfo{.{
+        .terminal_id = "t1",
+        .agent_status = .working,
+        .workspace_id = "ab",
+        .tab_id = "c",
+        .pane_id = "p1",
+        .focused = false,
+        .revision = 1,
+    }};
+    const snap_a = makeSnapshot(&agents_a, &.{}, &.{});
+
+    const agents_b = [_]types.AgentInfo{.{
+        .terminal_id = "t1",
+        .agent_status = .working,
+        .workspace_id = "a",
+        .tab_id = "bc",
+        .pane_id = "p1",
+        .focused = false,
+        .revision = 1,
+    }};
+    const snap_b = makeSnapshot(&agents_b, &.{}, &.{});
+
+    const fp_a = Store.computeFingerprint(snap_a);
+    const fp_b = Store.computeFingerprint(snap_b);
+
+    try testing.expect(fp_a != fp_b);
 }
