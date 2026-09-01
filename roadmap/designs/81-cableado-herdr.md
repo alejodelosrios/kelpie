@@ -34,7 +34,16 @@ activar la ventana y lo para al cerrar la aplicación.
 
 ## El Dispatcher: por qué la costura tiene que poder fallar
 
-`glib.MainContext.invoke` (`glib2.zig:5273`) acepta **un** `user_data`, y `Dispatcher.invoke`
+**Corrección del gate (2026-09-01):** el diseño decía `glib.MainContext.invoke`. Lo desmintió
+el test del hilo del propio `herdr_link.zig`: `MainContext.invoke` ejecuta la función **en
+línea** cuando el hilo que llama puede adquirir el contexto, y sin main loop dueña puede
+— la tarea corrió en el hilo trabajador (`expected 1949260, found 1949264`). En producción
+GTK posee el contexto y probablemente nunca habría ocurrido, pero eso dejaba la garantía
+central de este issue apoyada en un razonamiento sobre quién posee qué y cuándo, en vez de
+sobre el mecanismo. Se usa **`glib.idleAddOnce`**: una fuente idle siempre se encola y la
+drena la loop, nunca el llamador. Coste declarado: en tests, quien encola tiene que drenar.
+
+`glib.idleAddOnce` (`glib2.zig:20815`) acepta **un** `user_data`, y `Dispatcher.invoke`
 entrega **dos** punteros (`task` y `task_ctx`). Empaquetarlos exige alocar una caja, y esa alocación
 puede fallar. Hoy `invokeFn` no puede fallar (`Events.zig:14-21`), así que si la caja no se puede
 alocar **no hay forma de liberar `task_ctx`**: lo creó `Events.zig` con `gpa.create` y solo su
@@ -130,8 +139,9 @@ en orden de archivo, no de argumentos — `lessons-learned.md`, Ola 3 M1).
 
 | API | Fuente (`archivo:línea`) | Verificada |
 |---|---|---|
-| `glib.MainContext.invoke(context: ?*MainContext, function: glib.SourceFunc, data: ?*anyopaque) void` | `$GOB/src/glib2/glib2.zig:5273` | ✅ |
-| `glib.SourceFunc = *const fn (?*anyopaque) callconv(.c) c_int` | `$GOB/src/glib2/glib2.zig:25606` | ✅ |
+| `glib.idleAddOnce(function: glib.SourceOnceFunc, data: ?*anyopaque) c_uint` | `$GOB/src/glib2/glib2.zig:20815` | ✅ |
+| `glib.SourceOnceFunc = *const fn (?*anyopaque) callconv(.c) void` | `$GOB/src/glib2/glib2.zig:25660` | ✅ |
+| `glib.MainContext.iteration(context: ?*MainContext, may_block: c_int) c_int` (solo en tests, para drenar) | `$GOB/src/glib2/glib2.zig:5311` | ✅ |
 | `gio.Application.signals.shutdown` | `$GOB/src/gio2/gio2.zig:896` | ✅ |
 | `client.resolveSocketPath(environ, buf: *[std.fs.max_path_bytes]u8) ![]const u8` | `src/herdr/client.zig:64` | ✅ |
 | `LocalServer.ensureRunning(io, gpa, environ, socket_path, mode, ever_connected, launch, status_reader) !Status` | `src/herdr/LocalServer.zig:204` | ✅ |

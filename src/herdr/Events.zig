@@ -8,8 +8,11 @@ const types = @import("types.zig");
 
 /// Callback delivery seam: `EventsClient`'s reader thread never calls
 /// `on_event`/`on_resynced` directly — it always goes through
-/// `Dispatcher.invoke`. Production wraps `glib.MainContext.invoke`
-/// (lives in `src/ui/herdr_link.zig`); that binding packs two pointers
+/// `Dispatcher.invoke`. Production wraps `glib.idleAddOnce`
+/// (lives in `src/ui/herdr_link.zig`) — **no** `MainContext.invoke`, que
+/// ejecuta la tarea EN LÍNEA cuando el hilo que llama puede adquirir el
+/// contexto; una fuente idle siempre se encola y la drena la loop. Ese binding
+/// empaqueta dos punteros
 /// (`task` + `task_ctx`) into the single `user_data` GLib accepts, which
 /// requires a heap allocation that can fail — hence `!void`.
 pub const Dispatcher = struct {
