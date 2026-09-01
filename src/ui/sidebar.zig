@@ -85,6 +85,10 @@ pub fn buildRows(gpa: std.mem.Allocator, store: *Store) ![]Row {
                 .workspace_id = agent.workspace_id,
                 .agents = std.array_list.Managed(*const Agent).init(gpa),
             };
+            // El buffer de `agents` muere con el temporal si `groups.append`
+            // falla: el `defer` de arriba solo recorre `groups.items`, y este
+            // grupo aún no está ahí. Misma raíz que `makeRow`, un nivel afuera.
+            errdefer group.agents.deinit();
             try group.agents.append(agent);
             try groups.append(group);
         }
@@ -726,6 +730,42 @@ test "buildRows: empty store produces zero rows" {
 // the fallback is all any prior test could prove. This one seeds a
 // `WorkspaceInfo` with a label that differs from its `workspace_id` and
 // pins that the *label*, not the id, ends up as the row title.
+// Barrido de OOM sobre `buildRows`: `checkAllAllocationFailures` lo corre una vez
+// por cada punto de asignación, fallando en ese punto exacto, y exige que no
+// quede nada sin liberar. Es la red para una familia que ya mordió cinco veces
+// en este repo (`Connection.open`, `openLive`, `request()`, los literales de
+// `Row`, y el buffer de `Group` que el auditor de #16 destapó con este mismo
+// barrido): una asignación que muere con un temporal antes de llegar a su dueño.
+// Un `errdefer` que alguien olvide en el futuro se cae aquí, no en producción.
+test "buildRows: no leaks at any allocation failure point" {
+    const Ctx = struct {
+        fn run(gpa: std.mem.Allocator, store: *Store) !void {
+            const rows = try buildRows(gpa, store);
+            freeRows(gpa, rows);
+        }
+    };
+
+    var store = Store.init(testing.allocator);
+    defer store.deinit();
+
+    const agents = [_]types.AgentInfo{
+        testSnapshotAgent("p1", "ws-a", .idle, 1),
+        testSnapshotAgent("p2", "ws-a", .working, 2),
+        testSnapshotAgent("p3", "ws-b", .blocked, 3),
+    };
+    try store.applySnapshot(.{
+        .version = "1",
+        .protocol = 1,
+        .workspaces = &.{},
+        .tabs = &.{},
+        .panes = &.{},
+        .layouts = &.{},
+        .agents = &agents,
+    });
+
+    try testing.checkAllAllocationFailures(testing.allocator, Ctx.run, .{&store});
+}
+
 test "buildRows: workspace title comes from store.workspaces label when known" {
     var store = Store.init(testing.allocator);
     defer store.deinit();
