@@ -258,6 +258,16 @@ Formato: `- [YYYY-MM-DD] #issue — qué se vio · por qué no se arregló ahora
   quien vea este test rojo en CI **no lo relanza**: aísla el estado residual (ruta del socket por corrida,
   limpieza en el `defer`) antes de tocar nada más, y quien vuelva a `LocalServer.zig` por cualquier motivo
   (#81 es el siguiente candidato, que lo usará de verdad) lo arregla de paso.
+  · **ACTUALIZACIÓN 2026-09-01 (#81): ya no es intermitente, es determinista bajo carga.** Falla 5/5 en la
+  rama de #81 **y 3/3 en `develop` limpio**, o sea que no lo causó ningún cambio: lo causa la máquina.
+  `load average` ~10 en 8 núcleos (navegador, otras sesiones, herdr, quickshell — carga de escritorio
+  normal, no de compilación). El test que cae es `ensureRunning: dead socket → ~1s retry window →
+  launcher called` (`LocalServer.zig:544`), y `errno 111` (ECONNREFUSED) **escapa** de `ensureRunning`
+  hasta el `try` del test, pese a que los tres `tryConnect` del camino están todos con `catch`. El mismo
+  código pasó el CI de GitHub una hora antes. Que sea reproducible a voluntad lo vuelve **diagnosticable**,
+  que es mejor que flaky: quien lo ataque tiene banco de pruebas. Sigue fuera del alcance de #81 —
+  se registra, no se arregla de paso, porque tocar `LocalServer.zig` sin diseño es justo lo que este
+  repo no hace.
 
 - **2026-08-31 · #12 (hallado auditando #16) · `pane_agent_status_changed` borra `agent`, `display_agent`
   y `title` del agente.** `Store.zig:287-289` llama `updateOptionalField` con lo que traiga el evento, y
