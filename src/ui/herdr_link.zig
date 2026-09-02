@@ -574,8 +574,11 @@ test "debounce: dos eventos seguidos programan un solo timeout" {
     // the suite crashes at herdr_link.zig:325 — the same use-after-free
     // that `stop()` now prevents in production by cancelling the source.
     //
-    // This is the THIRD time this file trips on GLib timers outliving
-    // stack-allocated test state (see lines 424-436 for the first two).
+    // Tercera vez que este archivo tropieza con RECURSOS DE TEST QUE
+    // SOBREVIVEN A SU ESTADO EN LA PILA, aunque el recurso cambie: las dos
+    // primeras fueron `accept`s de un servidor herdr falso que colgaban la
+    // suite (líneas 424-436); esta es un timer de GLib. El modo de fallo no
+    // es el mismo, la familia sí.
     // The rule: if your test doesn't need a GLib main loop, don't touch
     // one.  Test the pure logic; leave the timer wiring to integration.
     var link: Link = .{};
