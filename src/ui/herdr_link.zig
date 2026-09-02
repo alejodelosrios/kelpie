@@ -170,7 +170,7 @@ pub const Link = struct {
             //          `realResync` (#84)
             //
             // Los dos tramos de 15 s se suman porque `EventsClient.stop()`
-            // (`Events.zig:131`) hace DOS joins secuenciales: primero el
+            // (`Events.zig:146`) hace DOS joins secuenciales: primero el
             // trabajador, después el lector. Los dos acaban en
             // `client.request(..., default_read_timeout_ms, ...)`
             // (`client.zig:88` = 15_000 ms), y `shutdown(.recv)` actúa sobre el
@@ -571,11 +571,11 @@ test "debounce: dos eventos seguidos programan un solo timeout" {
     // When the test ends, `link` dies, but the timer stays armed.  Later
     // tests pump the main context (`pumpUntilDrained`), the orphaned
     // timer fires, `debounceFired` dereferences the dead pointer, and
-    // the suite crashes at herdr_link.zig:281 — the same use-after-free
+    // the suite crashes at herdr_link.zig:325 — the same use-after-free
     // that `stop()` now prevents in production by cancelling the source.
     //
     // This is the THIRD time this file trips on GLib timers outliving
-    // stack-allocated test state (see lines 379-391 for the first two).
+    // stack-allocated test state (see lines 424-436 for the first two).
     // The rule: if your test doesn't need a GLib main loop, don't touch
     // one.  Test the pure logic; leave the timer wiring to integration.
     var link: Link = .{};

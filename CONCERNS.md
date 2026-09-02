@@ -349,7 +349,7 @@ Formato: `- [YYYY-MM-DD] #issue — qué se vio · por qué no se arregló ahora
 ## #84 — el snapshot como única fuente de `agent_status` (2026-09-01)
 
 - **El techo de bloqueo del hilo de UI al cerrar sube a ~43 s, y su probabilidad sube mucho más**
-  (`ui/herdr_link.zig:163-190`, `herdr/Events.zig:131`) · lo levantó el auditor de #84 · **qué es**:
+  (`ui/herdr_link.zig:163-190`, `herdr/Events.zig:146`) · lo levantó el auditor de #84 · **qué es**:
   `EventsClient.stop()` hace dos joins secuenciales —trabajador de resync, luego lector— y los dos
   pueden acabar en `client.request` con `default_read_timeout_ms` = 15 s (`client.zig:88`), que
   `shutdown(.recv)` no desbloquea porque actúa sobre el fd de la suscripción, no el de la petición ·
@@ -368,32 +368,32 @@ Formato: `- [YYYY-MM-DD] #issue — qué se vio · por qué no se arregló ahora
   ningún evento escribe `status`, y el replay converge · **cuándo importaría**: en cuanto un evento
   vuelva a mutar algo que la huella cubra.
 
-- **El no-solapamiento vale entre resyncs del trabajador, no globalmente** (`herdr/Events.zig:230`) ·
+- **El no-solapamiento vale entre resyncs del trabajador, no globalmente** (`herdr/Events.zig:245`) ·
   el hilo lector sigue llamando a `realResync` por su cuenta al abrir conexión · el diagrama del
   diseño (`roadmap/designs/84-snapshot-fuente-estado.md`) lo omite y debería decirlo.
 
-- **`scheduleResync`/`debounceFired` no los ejercita ningún test** (`ui/herdr_link.zig:283-300`) ·
+- **`scheduleResync`/`debounceFired` no los ejercita ningún test** (`ui/herdr_link.zig:310` y `:321`) ·
   el test solo llama a `shouldSchedule`, la mitad pura · **y es deliberado**: la alternativa es armar
   timers de GLib en tests, que ya provocó un use-after-free en este mismo archivo (tercera vez, ver
-  el comentario de sus líneas 344-356) · el temporizador de 100 ms real solo se cubre en el gate de
+  los comentarios de sus líneas 424-436 y 566-580) · el temporizador de 100 ms real solo se cubre en el gate de
   ventana real.
 
-- **Los tres bucles de `applySnapshot` usan `put`** (`model/Store.zig:247`, `:265`, `:283`) · un
+- **Los tres bucles de `applySnapshot` usan `put`** (`model/Store.zig:247`, `:261`, `:275`) · un
   `pane_id`/`workspace_id`/`tab_id` repetido dentro del mismo snapshot conserva la key vieja y filtra
   · misma familia que el `fetchPut` que denegó la auditoría de #12 · preexistente, pero los tres
   bucles se reescribieron en #84 sin cerrarlo.
 
 - **`onTransition` queda como código muerto en producción** · tras #84 `upsertAgent` ya no dispara
   transiciones y el único emisor vivo sería `pane_agent_status_changed`, que no está suscrito
-  (`herdr/Events.zig:73-95`) · el comentario de `ui/sidebar.zig:389-391` ya no dice la verdad ·
+  (`herdr/Events.zig:72-81`) · el comentario de `ui/sidebar.zig:389-391` ya no dice la verdad ·
   **ojo**: #18 (notificaciones) se cuelga precisamente de `onTransition`, así que esto hay que
   resolverlo **antes** de empezarlo, no después.
 
-- **`onEvent` no comprueba `link.stopping` antes de armar el timer** (`ui/herdr_link.zig:277`) · un
+- **`onEvent` no comprueba `link.stopping` antes de armar el timer** (`ui/herdr_link.zig:285`) · un
   evento que llegue durante el cierre programa un timeout que `stop()` puede no alcanzar a cancelar.
 
 - **La huella excluye `revision` a propósito** (`model/Store.zig:601`) · consecuencia: el desempate
-  por recencia dentro del mismo estado (`Store.zig:682-686`, de #16) deja de ser inmediato y se
+  por recencia dentro del mismo estado (`Store.zig:818-823`, de #16) deja de ser inmediato y se
   actualiza en el siguiente repintado real · **decisión del PM**, no accidente: incluirlo costaría
   una reconstrucción completa del sidebar ~1/s para siempre, y filas que saltan solas bajo el cursor
   tampoco son mejor UX · pendiente de que el dueño de #16 objete si no está de acuerdo.
