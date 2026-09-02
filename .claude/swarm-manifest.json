@@ -1,9 +1,9 @@
 {
   "proyecto": "kelpie",
   "generado_por": "/swarm-architect",
-  "generado": "2026-08-26",
-  "arquetipo": "B-hibrido-completo",
-  "arquetipo_nota": "El dueño eligió B completo (los tres builders en OpenCode+MiMo v2.5-pro) sabiendo que este stack —Zig 0.16 recién estrenado, ghostty-vt inestable pinneado por commit, GTK4 por bindings generados— es terreno de alucinación de firmas. La apuesta se sostiene sobre cinco defensas, no sobre el modelo: (1) zig build/test como juez mecánico antes de que el PM lea nada, (2) contrato de citas archivo:línea que el PM verifica ejecutando sed, (3) mirror pinneado obligatorio con rutas absolutas en el prompt del agente, (4) territorio congelado —build.zig.zon y deps intocables—, (5) mode:primary + temperature 0.0 + smoke test antes de cada Apply. El auditor sigue en Claude Opus: eso no se abarata.",
+  "generado": "2026-08-26 · migrado a Claude Code + MiMo el 2026-09-02 (#85)",
+  "arquetipo": "B-hibrido-claude-code-mimo",
+  "arquetipo_nota": "Híbrido: el ARNÉS es Claude Code en los cinco roles, el MODELO de los tres builders es MiMo de Xiaomi. Migrado desde OpenCode el 2026-09-02 (issue #85) tras medirlo en trabajo real durante #84. Lo que decidió la migración no fue calidad de diff —era comparable— sino tres fallos de arnés que costaron un ciclo entero: (1) `opencode run` no tiene memoria entre invocaciones, así que una ronda de corrección era un agente nuevo que leía el árbol, veía la spec ya implementada y salía exit 0 sin editar; el PM lo contó como muerte del motor y disparó un fallback innecesario. (2) OpenCode bufferea stdout fuera de una TTY, obligando a envolver todo Apply en `script -qefc` para poder vigilarlo. (3) El builder no veía las skills del repo, que son justo el contrato de APIs que más falta le hace a un modelo externo en este stack. Las cinco defensas siguen intactas y son lo que sostiene la apuesta, no el modelo: gate mecánico de zig, contrato de citas verificado con sed, mirror pinneado obligatorio, territorio congelado, y smoke test antes de cada Apply. El auditor sigue en Claude Opus: eso no se abarata.",
   "stack": {
     "lenguaje": "zig",
     "version": "0.16.0",
@@ -13,7 +13,7 @@
     "dep_pinneada": "ghostty commit 15ff186f65ca0bdbd1fa397ab03908d59de16463",
     "mirror_fuente": "~/.cache/ghostty-build/src/ghostty/"
   },
-  "motor_apply": "opencode-mimo",
+  "motor_apply": "claude-code+mimo",
   "hardware_en_loop": false,
   "qa_visual_requerido": true,
   "qa_visual_nota": "No hay hardware, pero sí gates que exigen la sesión Wayland real del humano: >=60 fps redibujando 200x60, retematizar en vivo sin un color fuera de sitio, toast clickeable que enfoca el agente, stty size contra la rejilla. El fleet compila y mide en paralelo; estos gates se serializan con el humano.",
@@ -43,7 +43,7 @@
     "runtime": "herdr",
     "base": "develop",
     "provisioning": [],
-    "provisioning_nota": "VACÍO A PROPÓSITO. .claude/ y .opencode/ van versionados, así que el worktree nace con comandos, agentes y skills. Zig regenera .zig-cache/ y zig-out/, y las deps van al cache global de Zig. No hay .env ni secretos de proyecto: la API key de MiMo vive en la config global de OpenCode. Cero symlinks."
+    "provisioning_nota": "VACÍO A PROPÓSITO. `.claude/` va versionado, así que el worktree nace con comandos, roles de builder, agentes y skills. Zig regenera .zig-cache/ y zig-out/. La credencial de MiMo vive FUERA del repo en ~/.config/kelpie/mimo.key (chmod 600), o en la variable MIMO_API_KEY. Cero symlinks, cero .env."
   },
   "comandos": {
     "kelpie-flow": "Un issue de punta a punta. 8 fases, dos gates humanos (diseño y merge). Fail-safe: con >=2 issues redirige a fleet.",
@@ -58,16 +58,19 @@
   },
   "agentes": {
     "core-builder": {
-      "motor": "opencode",
-      "model": "mimo/mimo-v2.5-pro",
-      "temperature": 0.0,
-      "mode": "primary",
+      "motor": "claude-code",
+      "model": "mimo-v2.5-pro[1m]",
       "territorio": [
         "src/terminal/",
         "src/rpc/",
         "src/pty/",
         "src/ssh/",
-        "src/font/"
+        "src/font/",
+        "src/model/",
+        "src/herdr/",
+        "build.zig",
+        "src/main.zig",
+        "src/app.zig"
       ],
       "labels": [
         "area:vt",
@@ -77,13 +80,13 @@
         "area:ssh",
         "area:font"
       ],
-      "fallback": ".claude/agents/core-builder-fallback.md (sonnet)"
+      "fallback": ".claude/agents/core-builder-fallback.md (sonnet)",
+      "rol": ".claude/builders/core-builder.md",
+      "lanzador": "scripts/kelpie-builder"
     },
     "ui-builder": {
-      "motor": "opencode",
-      "model": "mimo/mimo-v2.5-pro",
-      "temperature": 0.0,
-      "mode": "primary",
+      "motor": "claude-code",
+      "model": "mimo-v2.5-pro[1m]",
       "territorio": [
         "src/ui/",
         "src/omarchy/",
@@ -95,19 +98,22 @@
         "area:omarchy",
         "area:pkg"
       ],
-      "fallback": ".claude/agents/ui-builder-fallback.md (sonnet)"
+      "fallback": ".claude/agents/ui-builder-fallback.md (sonnet)",
+      "rol": ".claude/builders/ui-builder.md",
+      "lanzador": "scripts/kelpie-builder"
     },
     "docs-writer": {
-      "motor": "opencode",
-      "model": "mimo/mimo-v2.5-pro",
-      "temperature": 0.1,
-      "mode": "primary",
+      "motor": "claude-code",
+      "model": "mimo-v2.5[1m]",
       "territorio": [
         "docs/",
         "README.md",
         "CHANGELOG.md"
       ],
-      "fallback": "el PM lo escribe"
+      "fallback": "el PM lo escribe",
+      "rol": ".claude/builders/docs-writer.md",
+      "lanzador": "scripts/kelpie-builder",
+      "model_nota": "El barato a propósito: su trabajo es prosa verificada, no firmas de API. Si una tarea le exige deducir comportamiento no evidente del código, la devuelve al PM."
     },
     "qa": {
       "motor": "claude",
@@ -134,8 +140,8 @@
       "por_que": "backstop de seguridad antes del merge; NUNCA se recorta por costo"
     },
     "builders": {
-      "model": "mimo-v2.5-pro",
-      "por_que": "el volumen del Apply, con el gate mecánico de zig build y el contrato de citas como red"
+      "model": "mimo-v2.5-pro (docs-writer: mimo-v2.5)",
+      "por_que": "el volumen del Apply, con el gate mecánico de zig y el contrato de citas como red. docs-writer baja al modelo barato porque no escribe firmas."
     }
   },
   "verificacion": {
@@ -147,10 +153,10 @@
       "auditoría adversaria Opus"
     ],
     "regla": "El reporte del builder NUNCA es evidencia. Una cita falsa rechaza el diff AUNQUE COMPILE: ese es el fallo peligroso de un modelo externo en este stack — código que compila usando una API que el modelo creyó recordar.",
-    "fallback": "Build roto 2 veces, cita falsa o diff insatisfactorio -> git checkout -- . y relanzar con el subagente Claude equivalente. Dos fallbacks seguidos en el mismo issue = el problema es la spec, se para y se escala al humano."
+    "fallback": "Build roto 2 veces, cita falsa o diff insatisfactorio -> git checkout -- . y relanzar con el subagente Claude equivalente (.claude/agents/*-fallback.md, sonnet). ANTES de contar un fallo del motor, el PM enumera sus causas instrumentales: prompt de 'segunda ronda' sin --resume, Apply en primer plano (la Bash recorta a 600s y lo mata), o builder ciego por el grep roto. En #84 los dos 'fallos' contados eran del arnés, no del modelo. Dos fallbacks seguidos en el mismo issue = el problema es la spec, se para y se escala al humano."
   },
   "territorios_disjuntos": true,
-  "territorios_nota": "OpenCode no bloquea archivos entre procesos: dos builders sobre el mismo archivo, el segundo pisa al primero SIN error. Por eso el corte core/ui es duro y un issue que cruza territorio (p.ej. #35 ssh+ui) se secuencia, nunca se paraleliza.",
+  "territorios_nota": "Nada bloquea archivos entre procesos: dos builders sobre el mismo archivo, el segundo pisa al primero SIN error. Por eso el corte core/ui es duro y un issue que cruza territorio se secuencia, nunca se paraleliza. Vale igual para QA y auditor: el auditor se lanza cuando QA terminó Y commiteó.",
   "hotspots": {
     "archivos": [
       "build.zig",
@@ -165,26 +171,28 @@
     "lessons-learned.md": "memoria del enjambre: lo que hizo fallar un ciclo + la regla que lo evita. Append-only, solo el PM. Tres anclajes obligatorios: el PM lo lee en FASE 1, el auditor cruza el diff contra él en FASE 7, el PM escribe la lección en FASE 8; el orquestador del fleet consolida lo que solo se ve a nivel de ola. La frontera importa: deuda de producto va a CONCERNS, conocimiento del stack va a las skills, y aquí solo el proceso. Un ledger que nadie relee es peor que no tenerlo."
   },
   "gotchas_criticos": [
-    "PERMISOS FUERA DEL PROYECTO: OpenCode auto-rechaza en headless el acceso fuera del cwd (permiso `external_directory`). Sin abrirlo, los builders no pueden LEER el mirror pinneado de Ghostty — su única fuente de firmas — y escriben de memoria, que es el fallo que este enjambre existe para evitar. Se probó primero un mapa pattern->allow y NO sirve: bash pasaba (su parser no resuelve `~`, así que ni pide permiso) pero la herramienta Read seguía rechazada, dejando al builder con media fuente de verdad, que es peor que ninguna porque parece que funciona. Va en forma simple `external_directory: allow`. La contención real no es ese permiso (bash ya alcanza cualquier ruta) sino el territorio declarado, el diff que revisa el PM y el auditor.",
-    "El provider `mimo` no estaba en esta máquina Linux (la migración de TUI borró ~/.config/opencode/opencode.json). Se replicó desde la Mac (host ssh `m2`): baseURL de Xiaomi + key, en ~/.config/opencode/opencode.jsonc con chmod 600. El bloque `mcp` de la Mac (codegraph/supabase/playwright) NO se copió: codegraph no está instalado aquí y ninguno hace falta para kelpie. La key vive en texto plano en la config global (fuera de todo repo) — si se expone, se rota.",
-    "mode: subagent en un agente invocado con `opencode run --agent` = fallback silencioso al agente `build`. Los tres builders son mode: primary. Smoke test verificado 2026-08-26: los tres responden `> <agente> · mimo-v2.5-pro`.",
-    "Un spike que falla su criterio binario NO se improvisa: se para y se informa (ADR-0001, escalera de fallback).",
-    "Los gates visuales abren ventana en la sesión Wayland del humano: el fleet no los paraleliza."
+    "CREDENCIAL: ~/.config/kelpie/mimo.key (chmod 600) o la variable MIMO_API_KEY. Nunca en un archivo versionado. Endpoint: https://token-plan-sgp.xiaomimimo.com/anthropic (compatible con la API de Anthropic, que es lo que Claude Code consume). Si se expone, se rota.",
+    "EL SUFIJO [1m] NO ES COSMÉTICO: sin él Claude Code asume una ventana de 200k y auto-compacta un contexto que en realidad es de 1 048 576. El aviso `[claude-code:unrecognized_model]` sí es cosmético y se ignora.",
+    "MODELOS QUE EXISTEN EN ESTA SUSCRIPCIÓN, verificado el 2026-09-01 contra /v1/models: mimo-v2.5, mimo-v2.5-pro, y cuatro de voz (asr, tts, tts-voiceclone, tts-voicedesign). NO existe ninguna variante 'ultraspeed': se sondearon ocho nombres y todas devuelven 400 Not supported model. mimo-v2.5-pro es el techo del plan.",
+    "EL APPLY VA SIEMPRE A BACKGROUND. La herramienta Bash recorta a 600 s SIN AVISAR, así que un `timeout 2400` es ficción: mata a un builder sano a mitad y deja el árbol a medias. Ocurrió en #84 con 648 inserciones dentro.",
+    "LA RONDA DE CORRECCIÓN VA CON --resume <session_id>. Sin eso el builder es un proceso nuevo sin memoria: leerá el árbol, verá el trabajo ya hecho y saldrá sin editar. No es un motor muerto, es un prompt imposible.",
+    "VIGILANCIA: --output-format json NO emite nada hasta terminar. Lo que se escribe en vivo es el transcript ~/.claude/projects/<slug>/<session-id>.jsonl, herramienta a herramienta. Es la única forma de distinguir trabajando / esperando / muerto.",
+    "`grep` ESTÁ SOMBREADO en esta máquina por una función de shell de Claude Code que rompe con -E/-A y devuelve VACÍO SIN AVISAR. Dejó a un builder ciego tres corridas seguidas leyendo la salida de zig build test. El aviso en el prompt NO basta (se probó): está escrito en los tres roles, y la mitigación real sería sanear el PATH. Usar awk o /usr/bin/grep con ruta absoluta.",
+    "`cmd | tail` DEVUELVE EL EXIT CODE DE `tail`. Un gate verificado así sale verde siempre. Se corre `cmd >/dev/null 2>&1; echo $?`.",
+    "Un spike que falla su criterio binario NO se improvisa: se para y se informa (ADR-0001).",
+    "Los gates visuales abren ventana en la sesión Wayland del humano: el fleet no los paraleliza. Y se corren EN CUANTO hay algo que ejecutar, no al final: en #84 todo el pipeline estaba verde sobre una app cuyo sidebar no se actualizaba."
   ],
   "guia_fuente": "~/.claude/docs/kelpie-swarm-guia.md",
   "guia_vault": "~/Documents/Obsidian/MY_NOTES/Personal/kelpie-swarm-guia.md",
   "notas_variacion": "Sin OpenSpec (decisión del dueño: velocidad). Sin CodeGraph (no está instalado en la máquina). Sin ledger DEPRECATED (repo nuevo, nada que deprecar todavía). Sin cloud: la app es GTK sobre Wayland y sus gates exigen la máquina local.",
   "motor_apply_verificado": {
-    "fecha": "2026-08-26",
-    "smoke_test": "core-builder, ui-builder y docs-writer responden con su propio agente y mimo-v2.5-pro; sin fallback silencioso",
-    "provider_config": "~/.config/opencode/opencode.jsonc (chmod 600), replicado desde el host ssh `m2`",
-    "modelos_disponibles_en_mimo": [
-      "mimo-v2.5-pro",
-      "mimo-v2.5",
-      "mimo-v2-pro",
-      "mimo-v2-omni"
-    ],
-    "contrato_de_citas": "Verificado end-to-end el 2026-08-26: core-builder localizó por su cuenta el iterador de filas sucias en el mirror y citó include/ghostty/vt/render.h:624 (ghostty_render_state_row_iterator_next_dirty) y lib_vt.zig:295-296,303. El PM verificó la cita con sed contra la fuente: exacta, incluida la semántica (NULL devuelve false, no limpia dirty state).",
-    "latencia_observada": "~8 min una tarea de solo lectura sobre el mirror. El Apply real no es cuestión de segundos: en fleet se mata por falta de progreso, nunca por reloj."
+    "fecha": "2026-09-02",
+    "issue": "#85",
+    "smoke_test": "Los tres builders responden PONG con su modelo: core-builder y ui-builder en mimo-v2.5-pro[1m], docs-writer en mimo-v2.5[1m]. Ejecutado con scripts/kelpie-builder.",
+    "endpoint": "https://token-plan-sgp.xiaomimimo.com/anthropic (API de Anthropic nativa)",
+    "credencial": "~/.config/kelpie/mimo.key (chmod 600) | MIMO_API_KEY",
+    "resume_verificado": "Sí, dos veces en trabajo real durante #84: la sesión conserva contexto, firmas verificadas y punto de atasco.",
+    "ab_contra_opencode": "Mismo modelo, mismo trabajo, distinto arnés. OpenCode abandonó dos veces con listas multi-tarea e ignoró el aviso del grep roto quedándose ciego. Claude Code completó las cuatro tareas de una pasada, usó awk desde el primer comando, verificó cada firma en la fuente, y encadenó dos rondas de corrección con --resume. Calidad de diff comparable.",
+    "no_medido": "Coste real y latencia comparada. El JSON de salida reporta total_cost_usd pero con costBasis 'unknown': es la estimación de precios de Claude, no la facturación de Xiaomi. Los conteos de tokens sí son reales."
   }
 }
