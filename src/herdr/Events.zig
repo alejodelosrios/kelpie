@@ -106,15 +106,56 @@ pub const EventsClient = struct {
     active_fd: std.atomic.Value(net.Socket.Handle) = .init(-1),
     thread: ?std.Thread = null,
 
+    // #84: Resync worker thread fields. The resync cannot run on the UI
+    // thread (client.request blocks up to ~105ms p95) or the reader thread
+    // (blocked in takeLine). A dedicated worker thread handles resync
+    // requests with coalescence (via resync_pending) and no overlap
+    // (single thread, sequential).
+    resync_sem: Io.Semaphore = .{},
+    resync_pending: std.atomic.Value(bool) = .init(false),
+    resync_thread: ?std.Thread = null,
+
+    /// Injectable resync seam: production uses `realResync` (calls
+    /// `client.request`); tests inject a counter/mock that doesn't touch
+    /// the network. Set to `null` for production (uses `realResync`).
+    resync_fn: ?*const fn (self: *EventsClient) anyerror!void = null,
+
     pub fn start(self: *EventsClient) !void {
         self.thread = try std.Thread.spawn(.{}, run, .{self});
+        self.resync_thread = try std.Thread.spawn(.{}, resyncWorker, .{self});
     }
 
-    /// Clean shutdown: marks `stopping`, unblocks a read in progress with
-    /// `shutdown(.recv)` on the active fd (same mechanism as
-    /// `client.zig:130-156`'s `Watchdog`), then joins the reader thread.
+    /// Clean shutdown, en DOS joins secuenciales: primero el trabajador de
+    /// resync, después el lector.
+    ///
+    /// 1. Marca `stopping`, y despierta al trabajador posteando el semáforo
+    ///    (sin eso, un trabajador dormido nunca ve `stopping` y el join no
+    ///    vuelve jamás).
+    /// 2. Joinea al trabajador. **Puede tardar hasta 15 s**: si estaba dentro
+    ///    de `realResync`, está bloqueado en `client.request` con
+    ///    `default_read_timeout_ms` (`client.zig:88`).
+    /// 3. Desbloquea la lectura en curso con `shutdown(.recv)` sobre el fd
+    ///    activo (mismo mecanismo que el `Watchdog` de `client.zig:130-156`)
+    ///    y joinea al lector. **Otros 15 s** si estaba en su propio `resync()`:
+    ///    `shutdown` actúa sobre el fd de la suscripción, no sobre el de la
+    ///    petición.
+    ///
+    /// O sea, este `stop()` aporta hasta ~30 s de los ~43 s de techo que
+    /// declara `Link.stop()` en `ui/herdr_link.zig`. Si cambias el orden o los
+    /// timeouts, ese comentario hay que actualizarlo.
     pub fn stop(self: *EventsClient) void {
         self.stopping.store(true, .release);
+
+        // Wake the resync worker if it's sleeping on the semaphore.
+        // It will check `stopping` and exit.
+        self.resync_pending.store(true, .release);
+        self.resync_sem.post(self.io);
+
+        // Join resync thread first (it may be in the middle of a resync)
+        if (self.resync_thread) |t| t.join();
+        self.resync_thread = null;
+
+        // Then stop the reader thread
         const fd = self.active_fd.load(.acquire);
         if (fd != -1) {
             const tmp: net.Stream = .{ .socket = .{ .handle = fd, .address = undefined } };
@@ -122,6 +163,44 @@ pub const EventsClient = struct {
         }
         if (self.thread) |t| t.join();
         self.thread = null;
+    }
+
+    /// Request a resync (snapshot fetch). Coalesces: if a resync is already
+    /// pending, this is a no-op. The actual resync runs on the dedicated
+    /// worker thread.
+    pub fn requestResync(self: *EventsClient) void {
+        // Coalescence: if resync_pending was already true, another resync
+        // is either pending or in flight — don't post again.
+        if (self.resync_pending.swap(true, .acq_rel) == false) {
+            self.resync_sem.post(self.io);
+        }
+    }
+
+    /// Dedicated worker thread for resync requests. Waits on the semaphore,
+    /// checks for stopping, then performs a resync. If another request
+    /// arrives during a resync, it's coalesced (resync_pending stays true)
+    /// and handled after the current one completes.
+    fn resyncWorker(self: *EventsClient) void {
+        while (!self.stopping.load(.acquire)) {
+            self.resync_sem.wait(self.io) catch return;
+
+            // Check stopping immediately after waking
+            if (self.stopping.load(.acquire)) return;
+
+            // Clear pending flag BEFORE doing the resync, so that if another
+            // requestResync() arrives during resync, it will set pending=true
+            // and post the semaphore, causing us to loop again.
+            self.resync_pending.store(false, .release);
+
+            // Use injectable seam if provided (for testing), otherwise real resync
+            const fn_ptr = self.resync_fn orelse realResync;
+            // warn, not err: a failed resync is transitory — the next event
+            // triggers a new resync, the worker is still alive, and nobody
+            // needs to intervene. `err` means "needs attention"; this doesn't.
+            fn_ptr(self) catch |err| {
+                std.log.warn("resync failed: {}", .{err});
+            };
+        }
     }
 
     fn run(self: *EventsClient) void {
@@ -163,7 +242,7 @@ pub const EventsClient = struct {
         // — exactamente lo que apareció al matar y relevantar el servidor en el
         // gate de integración. Fallar aquí devuelve el control a `run()`, que
         // reintenta el ciclo completo con backoff.
-        try self.resync();
+        try self.realResync();
 
         while (true) {
             const line = try takeLine(&conn.reader.interface);
@@ -174,7 +253,9 @@ pub const EventsClient = struct {
         }
     }
 
-    fn resync(self: *EventsClient) !void {
+    /// Production resync: calls client.request to fetch session.snapshot.
+    /// Used as the default when `resync_fn` is null.
+    fn realResync(self: *EventsClient) !void {
         var rpc_err: ?client.RpcError = null;
         const resp = client.request(self.gpa, self.io, self.socket_path, "session.snapshot", .{}, client.default_read_timeout_ms, &rpc_err) catch |err| {
             if (err == error.HerdrRpc) rpc_err.?.deinit(self.gpa);
@@ -728,4 +809,313 @@ test "stop() during a backoff sleep returns fast, not after the full delay" {
     // Regression guard for the un-sliced `Io.sleep(backoff_ms)`: without
     // slicing, this would block for most of the remaining ~900ms.
     try testing.expect(elapsed.nanoseconds < 300 * std.time.ns_per_ms);
+}
+
+// ---------------------------------------------------------------------------
+// #84: Resync worker thread tests — exact names from the design
+// ---------------------------------------------------------------------------
+
+/// Test double for resync: counts calls and can be configured to block
+/// until signaled, so we can test coalescence and no-overlap.
+const ResyncCounter = struct {
+    count: std.atomic.Value(u32) = .init(0),
+    /// If set, resync blocks until this is posted.
+    block_sem: ?*Io.Semaphore = null,
+    /// Concurrency tracking: incremented on entry, decremented on exit.
+    in_flight: std.atomic.Value(u32) = .init(0),
+    /// High-water mark of concurrent resyncs seen.
+    max_in_flight: std.atomic.Value(u32) = .init(0),
+
+    fn doResync(self: *ResyncCounter) void {
+        const cur = self.in_flight.fetchAdd(1, .monotonic) + 1;
+        // Update max_in_flight via CAS loop (fetchMax not available on all targets).
+        var prev = self.max_in_flight.load(.monotonic);
+        while (cur > prev) {
+            prev = self.max_in_flight.cmpxchgWeak(prev, cur, .monotonic, .monotonic) orelse break;
+        }
+        defer _ = self.in_flight.fetchSub(1, .monotonic);
+
+        if (self.block_sem) |s| s.wait(testing.io) catch {};
+        _ = self.count.fetchAdd(1, .monotonic);
+    }
+
+    /// Returns a function pointer suitable for `EventsClient.resync_fn`.
+    /// Uses a comptime-generated wrapper to match the EventsClient signature.
+    fn resyncFn(self: *ResyncCounter) *const fn (*EventsClient) anyerror!void {
+        const S = struct {
+            var counter_ptr: *ResyncCounter = undefined;
+            fn wrapper(_: *EventsClient) anyerror!void {
+                counter_ptr.doResync();
+            }
+        };
+        S.counter_ptr = self;
+        return &S.wrapper;
+    }
+};
+
+test "requestResync: una ráfaga de N avisos produce una sola petición" {
+    // #84: Uses injectable resync seam — NO sockets, NO network.
+    // The ResyncCounter counts how many times resync is called.
+    var counter = ResyncCounter{};
+
+    var callbacks = RecordingCallbacks{};
+    var thread_id_dispatcher = ThreadIdDispatcher{};
+    var no_sleep = RecordingSleeper{};
+
+    // We still need a socket path for the reader thread, but it won't
+    // actually connect for resync (we inject the resync function).
+    var path_buf: [64]u8 = undefined;
+    var server: net.Server = undefined;
+    const path = try startFakeServer(&server, testing.io, &path_buf);
+    defer Io.Dir.deleteFileAbsolute(testing.io, path) catch {};
+
+    // Server that just accepts and closes (for the reader thread's initial connection)
+    const DummyServer = struct {
+        fn run(srv: *net.Server, io: Io) void {
+            const stream = srv.accept(io) catch return;
+            stream.close(io);
+        }
+    };
+    const server_thread = try std.Thread.spawn(.{}, DummyServer.run, .{ &server, testing.io });
+    defer server_thread.join();
+    defer server.deinit(testing.io);
+
+    const socket_path = try testing.allocator.dupe(u8, path);
+    defer testing.allocator.free(socket_path);
+
+    var events_client = EventsClient{
+        .gpa = testing.allocator,
+        .io = testing.io,
+        .socket_path = socket_path,
+        .dispatcher = thread_id_dispatcher.dispatcher(),
+        .sleeper = no_sleep.sleeper(),
+        .on_event = RecordingCallbacks.onEvent,
+        .on_resynced = RecordingCallbacks.onResynced,
+        .callback_ctx = &callbacks,
+        .resync_fn = counter.resyncFn(),
+    };
+    try events_client.start();
+
+    // Wait for the resync worker to start and process the initial resync
+    Io.sleep(testing.io, .fromMilliseconds(100), .awake) catch {};
+
+    const before = counter.count.load(.acquire);
+
+    // Send 10 rapid requestResync() calls
+    for (0..10) |_| {
+        events_client.requestResync();
+    }
+
+    // Wait for the coalesced resync to complete
+    Io.sleep(testing.io, .fromMilliseconds(200), .awake) catch {};
+    events_client.stop();
+
+    // Only ONE additional resync should have happened (coalescence)
+    const after = counter.count.load(.acquire);
+    try testing.expectEqual(@as(u32, 1), after - before);
+}
+
+test "requestResync: un aviso durante un resync en vuelo se encola, no se solapa" {
+    // #84: Uses injectable resync seam with a blocking resync to test
+    // that a second request during an in-flight resync is enqueued, not lost.
+    var block_sem: Io.Semaphore = .{};
+    var counter = ResyncCounter{ .block_sem = &block_sem };
+
+    var callbacks = RecordingCallbacks{};
+    var thread_id_dispatcher = ThreadIdDispatcher{};
+    var no_sleep = RecordingSleeper{};
+
+    var path_buf: [64]u8 = undefined;
+    var server: net.Server = undefined;
+    const path = try startFakeServer(&server, testing.io, &path_buf);
+    defer Io.Dir.deleteFileAbsolute(testing.io, path) catch {};
+
+    const DummyServer = struct {
+        fn run(srv: *net.Server, io: Io) void {
+            const stream = srv.accept(io) catch return;
+            stream.close(io);
+        }
+    };
+    const server_thread = try std.Thread.spawn(.{}, DummyServer.run, .{ &server, testing.io });
+    defer server_thread.join();
+    defer server.deinit(testing.io);
+
+    const socket_path = try testing.allocator.dupe(u8, path);
+    defer testing.allocator.free(socket_path);
+
+    var events_client = EventsClient{
+        .gpa = testing.allocator,
+        .io = testing.io,
+        .socket_path = socket_path,
+        .dispatcher = thread_id_dispatcher.dispatcher(),
+        .sleeper = no_sleep.sleeper(),
+        .on_event = RecordingCallbacks.onEvent,
+        .on_resynced = RecordingCallbacks.onResynced,
+        .callback_ctx = &callbacks,
+        .resync_fn = counter.resyncFn(),
+    };
+    try events_client.start();
+
+    // Wait for the resync worker to start
+    Io.sleep(testing.io, .fromMilliseconds(100), .awake) catch {};
+
+    // Fire a resync — it will block on block_sem
+    events_client.requestResync();
+    Io.sleep(testing.io, .fromMilliseconds(50), .awake) catch {};
+
+    // Fire another while the first is blocked — should be enqueued
+    events_client.requestResync();
+
+    // TAREA 4: sleep so the worker has time to start a second resync IF
+    // it were going to (broken worker that solapas). With a correct worker
+    // the first resync is still blocked inside block_sem, so the worker
+    // never reaches the second — max_in_flight stays at 1.
+    Io.sleep(testing.io, .fromMilliseconds(100), .awake) catch {};
+
+    // Now unblock the first resync
+    block_sem.post(testing.io);
+    Io.sleep(testing.io, .fromMilliseconds(100), .awake) catch {};
+
+    // Unblock the second resync (if it was enqueued)
+    block_sem.post(testing.io);
+    Io.sleep(testing.io, .fromMilliseconds(100), .awake) catch {};
+
+    events_client.stop();
+
+    // Both resyncs should have completed
+    const total = counter.count.load(.acquire);
+    try testing.expect(total >= 2);
+
+    // TAREA 4: the resync worker is single-threaded and sequential —
+    // max concurrent resyncs must be exactly 1.
+    try testing.expectEqual(@as(u32, 1), counter.max_in_flight.load(.acquire));
+}
+
+test "EventsClient.stop(): despierta al trabajador de resync dormido" {
+    var path_buf: [64]u8 = undefined;
+    var server: net.Server = undefined;
+    const path = try startFakeServer(&server, testing.io, &path_buf);
+    defer Io.Dir.deleteFileAbsolute(testing.io, path) catch {};
+
+    // Server that accepts but never responds — the reader thread will block,
+    // but the resync worker should be woken by stop().
+    const HangServer = struct {
+        fn run(srv: *net.Server, io: Io) void {
+            const stream = srv.accept(io) catch return;
+            defer stream.close(io);
+            io.sleep(.fromMilliseconds(5000), .awake) catch {};
+        }
+    };
+    const server_thread = try std.Thread.spawn(.{}, HangServer.run, .{ &server, testing.io });
+    defer server_thread.join();
+    defer server.deinit(testing.io);
+
+    var callbacks = RecordingCallbacks{};
+    var thread_id_dispatcher = ThreadIdDispatcher{};
+    var no_sleep = RecordingSleeper{};
+
+    const socket_path = try testing.allocator.dupe(u8, path);
+    defer testing.allocator.free(socket_path);
+
+    var events_client = EventsClient{
+        .gpa = testing.allocator,
+        .io = testing.io,
+        .socket_path = socket_path,
+        .dispatcher = thread_id_dispatcher.dispatcher(),
+        .sleeper = no_sleep.sleeper(),
+        .on_event = RecordingCallbacks.onEvent,
+        .on_resynced = RecordingCallbacks.onResynced,
+        .callback_ctx = &callbacks,
+    };
+    try events_client.start();
+
+    // Let the resync worker settle into waiting on the semaphore
+    Io.sleep(testing.io, .fromMilliseconds(100), .awake) catch {};
+
+    const start = std.Io.Timestamp.now(testing.io, .awake);
+    events_client.stop();
+    const elapsed = start.durationTo(std.Io.Timestamp.now(testing.io, .awake));
+
+    // stop() must return quickly — the resync worker must be woken by
+    // the semaphore post and see `stopping`.
+    try testing.expect(elapsed.nanoseconds < 500 * std.time.ns_per_ms);
+}
+
+/// Test double that fails the first resync call and succeeds after.
+/// Counts total calls so the test can verify the worker survived the error.
+const FailFirstResync = struct {
+    call_count: std.atomic.Value(u32) = .init(0),
+
+    fn doResync(self: *FailFirstResync) !void {
+        const n = self.call_count.fetchAdd(1, .monotonic);
+        if (n == 0) return error.SimulatedFailure;
+    }
+
+    fn resyncFn(self: *FailFirstResync) *const fn (*EventsClient) anyerror!void {
+        const S = struct {
+            var counter_ptr: *FailFirstResync = undefined;
+            fn wrapper(_: *EventsClient) anyerror!void {
+                try counter_ptr.doResync();
+            }
+        };
+        S.counter_ptr = self;
+        return &S.wrapper;
+    }
+};
+
+test "resyncWorker: un resync que falla no mata al trabajador" {
+    var fail_first = FailFirstResync{};
+
+    var callbacks = RecordingCallbacks{};
+    var thread_id_dispatcher = ThreadIdDispatcher{};
+    var no_sleep = RecordingSleeper{};
+
+    var path_buf: [64]u8 = undefined;
+    var server: net.Server = undefined;
+    const path = try startFakeServer(&server, testing.io, &path_buf);
+    defer Io.Dir.deleteFileAbsolute(testing.io, path) catch {};
+
+    const DummyServer = struct {
+        fn run(srv: *net.Server, io: Io) void {
+            const stream = srv.accept(io) catch return;
+            stream.close(io);
+        }
+    };
+    const server_thread = try std.Thread.spawn(.{}, DummyServer.run, .{ &server, testing.io });
+    defer server_thread.join();
+    defer server.deinit(testing.io);
+
+    const socket_path = try testing.allocator.dupe(u8, path);
+    defer testing.allocator.free(socket_path);
+
+    var events_client = EventsClient{
+        .gpa = testing.allocator,
+        .io = testing.io,
+        .socket_path = socket_path,
+        .dispatcher = thread_id_dispatcher.dispatcher(),
+        .sleeper = no_sleep.sleeper(),
+        .on_event = RecordingCallbacks.onEvent,
+        .on_resynced = RecordingCallbacks.onResynced,
+        .callback_ctx = &callbacks,
+        .resync_fn = fail_first.resyncFn(),
+    };
+    try events_client.start();
+
+    // First requestResync — the injected function will fail on call #1.
+    events_client.requestResync();
+    // Wait for the worker to process the failed resync and return to
+    // waiting on the semaphore.
+    Io.sleep(testing.io, .fromMilliseconds(200), .awake) catch {};
+
+    // Second requestResync — call #2 must succeed (fail_first only fails
+    // on the first call). If the worker died from the error, this never
+    // fires.
+    events_client.requestResync();
+    Io.sleep(testing.io, .fromMilliseconds(200), .awake) catch {};
+
+    events_client.stop();
+
+    // Both calls must have happened: the failed one and the successful one.
+    const total = fail_first.call_count.load(.acquire);
+    try testing.expect(total >= 2);
 }

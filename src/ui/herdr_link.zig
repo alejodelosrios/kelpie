@@ -100,6 +100,35 @@ pub const Link = struct {
     /// instead of blocking on `ensureRunning` or `EventsClient.start`.
     stopping: std.atomic.Value(bool) = .init(false),
 
+    /// Debounce flag for resync scheduling.  Both `onEvent` and the
+    /// `debounceFired` callback run on the UI thread (by construction:
+    /// GLib trampoline), so no atomic is needed.  If someone "fixes" this
+    /// to use an atomic, they're wrong — the single-thread guarantee
+    /// comes from the GLib main context, not from the flag type.
+    resync_scheduled: bool = false,
+
+    /// GLib source ID of the pending debounce timeout, if any.
+    /// Stored so `stop()` can cancel it — otherwise `debounceFired`
+    /// would fire on a freed Link (same use-after-free that the test
+    /// exposed).  `glib.timeoutAddOnce` returns `c_uint`; 0 means no
+    /// source pending (GLib source IDs are always > 0).
+    resync_source_id: ?c_uint = null,
+
+    /// GLib source ID of the periodic poll (**150 ms** — el valor lo arma
+    /// `armPollTrampoline`, y ahí está el porqué de 150 y no 300).  Exists
+    /// because herdr 0.8.2 does NOT emit `pane.agent_status_changed` —
+    /// verified three ways: without `pane_id` it rejects, with `pane_id` it
+    /// gives 0 events, and 55 s watching real agents gave 0 events while the
+    /// snapshot DID change.  The debounce-by-event path only fires when
+    /// some pane writes terminal output; in a quiet session that can take
+    /// 10+ s.
+    ///
+    /// Peor caso MEDIDO en la ventana real, no calculado: 12 transiciones
+    /// consecutivas con la app asentada dan min 41 / p50 161 / **max 251 ms**,
+    /// contra el criterio de 500 ms del issue.  (El cálculo ingenuo de
+    /// «un tick + p95» daba ~405 ms y resultó FALSO: ver `armPollTrampoline`.)
+    poll_source_id: ?c_uint = null,
+
     /// Resolve the socket, spawn a startup thread that calls
     /// `ensureRunning` (may block ~10 s) then `EventsClient.start()`.
     /// The startup thread publishes `Status.kind` to the UI via the
@@ -132,18 +161,55 @@ pub const Link = struct {
     /// shutdown+join on its reader thread).
     pub fn stop(self: *Link) void {
         self.stopping.store(true, .release);
+
+        // Cancel a pending debounce timeout if one is armed.  Otherwise
+        // `debounceFired` would fire on a freed or restarting Link — the
+        // same use-after-free that crashed the test suite.  We cancel the
+        // GLib source rather than using a `stopping` flag because a flag
+        // only protects against "don't touch fields" — the source itself
+        // would still fire and the pointer it carries would still dangle.
+        // `glib.Source.remove` is `g_source_remove` (glib2.zig:9913).
+        if (self.resync_source_id) |id| {
+            _ = glib.Source.remove(id);
+            self.resync_source_id = null;
+            self.resync_scheduled = false;
+        }
+
+        // Cancel the periodic poll.  Same rationale as the debounce
+        // cancellation above: the source carries a pointer to this Link,
+        // and firing on a freed Link is a use-after-free.
+        if (self.poll_source_id) |id| {
+            _ = glib.Source.remove(id);
+            self.poll_source_id = null;
+        }
+
         if (self.startup_thread) |t| {
-            // ponytail: este join bloquea el hilo de UI, y el techo son ~28 s,
-            // no los ~13 que decía antes de que el auditor sumara el otro tramo:
-            // ~10 s de ventana de lanzamiento + ~3 s de `readHerdrStatus`
-            // (`ensureRunning`, herdr ausente), MÁS hasta 15 s si `stop()` llega
-            // con el lector dentro de `resync()` → `client.request`, porque
-            // `shutdown(.recv)` actúa sobre el fd de la suscripción y no
-            // desbloquea el de la petición (`client.zig:88`,
-            // `default_read_timeout_ms`). Peor caso: proceso zombi ~28 s tras
-            // cerrar la ventana. Cortarlo exige una costura cancelable en
-            // `LocalServer.ensureRunning` y otra en `client.request` — issue
-            // propio, fuera del territorio de ui-builder.
+            // ponytail: este join bloquea el hilo de UI, y el techo son ~43 s.
+            // Desglose, que ha crecido dos veces y conviene tener entero:
+            //   ~10 s  ventana de lanzamiento de `ensureRunning`
+            //   ~3 s   `readHerdrStatus` con herdr ausente
+            //   ~15 s  si `stop()` llega con el LECTOR dentro de `resync()`
+            //   ~15 s  si `stop()` llega con el TRABAJADOR de resync dentro de
+            //          `realResync` (#84)
+            //
+            // Los dos tramos de 15 s se suman porque `EventsClient.stop()`
+            // (`Events.zig:146`) hace DOS joins secuenciales: primero el
+            // trabajador, después el lector. Los dos acaban en
+            // `client.request(..., default_read_timeout_ms, ...)`
+            // (`client.zig:88` = 15_000 ms), y `shutdown(.recv)` actúa sobre el
+            // fd de la suscripción, no sobre el de la petición, así que no
+            // desbloquea ninguno de los dos.
+            //
+            // Y ojo a la PROBABILIDAD, que importa más que el techo: el tramo
+            // del lector solo se pagaba en la ventana de reconexión, mientras
+            // que el del trabajador se puede pagar en cualquier momento —
+            // #84 deja un resync en vuelo ~1/s en sesión activa. Cerrar la
+            // ventana contra un herdr que no responde congela la UI hasta 15 s
+            // de forma rutinaria, no excepcional.
+            //
+            // Cortarlo exige una costura cancelable en `LocalServer.ensureRunning`
+            // y otra en `client.request` — issue propio, fuera del territorio de
+            // ui-builder. Anotado en CONCERNS.md.
             t.join();
             self.startup_thread = null;
         }
@@ -211,6 +277,21 @@ fn startupThreadFn(link: *Link, io: std.Io, gpa: std.mem.Allocator, environ: *st
     link.events_client.?.start() catch |err| {
         std.log.err("herdr_link: EventsClient.start failed: {t}", .{err});
     };
+
+    // Arm the periodic poll from the UI thread.  We cannot call
+    // glib.timeoutAdd here — this is the startup thread, not the UI
+    // thread, and arming a GLib source from another thread is a race.
+    // The dispatcher enqueues `armPollTrampoline` onto the GLib main
+    // context, same pattern as `publishStatusTrampoline`.
+    const poll_ctx = gpa.create(PollArmCtx) catch {
+        std.log.err("herdr_link: failed to allocate PollArmCtx", .{});
+        return;
+    };
+    poll_ctx.* = .{ .link = link };
+    link.dispatcher.dispatcher().invoke(&armPollTrampoline, poll_ctx) catch {
+        std.log.err("herdr_link: dispatcher.invoke(armPoll) failed", .{});
+        gpa.destroy(poll_ctx);
+    };
 }
 
 /// Context for the status-publish trampoline.  Heap-allocated by the
@@ -235,6 +316,46 @@ pub var updateStatusLabel: *const fn (kind: LocalServer.Kind) void = &noopUpdate
 
 fn noopUpdateStatusLabel(_: LocalServer.Kind) void {}
 
+/// Context for the poll-arming trampoline.  Heap-allocated by the
+/// startup thread, freed by the trampoline after it runs on the UI thread.
+const PollArmCtx = struct {
+    link: *Link,
+};
+
+/// Runs on the UI thread (GLib trampoline). Arma el sondeo periódico que
+/// llama a `requestResync()` pase lo que pase.
+///
+/// **150 ms, calibrado midiendo, no elegido de cabeza.** El diseño partió de
+/// 300 ms suponiendo que el peor caso era «un tick + el p95 del snapshot»
+/// (~405 ms). Medido en la ventana real, ese cálculo se queda corto porque el
+/// trabajador de resync es SECUENCIAL: si el tick cae con un resync en vuelo,
+/// el nuevo espera a que el anterior termine. El peor caso real es
+/// `tick + resync en curso + resync nuevo`, que con 300 ms daba ~510 ms y se
+/// midió un caso de 563 ms — fuera del criterio de 500 ms del issue.
+///
+/// Con 150 ms el peor caso baja a ~150 + 105 + 105 ≈ 360 ms, con margen. El
+/// coste sube a ~6.6 peticiones/s a un socket unix local (p50 28 ms) desde un
+/// hilo que no es el de UI, y la guarda de huella de `applySnapshot` hace que
+/// las que no traen cambios no toquen el Store ni repinten.
+fn armPollTrampoline(ctx: *anyopaque) void {
+    const pc: *PollArmCtx = @ptrCast(@alignCast(ctx));
+    // glib.timeoutAdd (glib2.zig:24388): returns c_uint source ID.
+    // pollFired returns 1 (SOURCE_CONTINUE) so the source stays alive.
+    pc.link.poll_source_id = glib.timeoutAdd(150, &pollFired, pc.link);
+    pc.link.gpa.destroy(pc);
+}
+
+/// `glib.SourceFunc` (glib2.zig:25606): returns c_int.  Returns 1 to
+/// keep the source alive (SOURCE_CONTINUE is declared as bool `true`
+/// but SourceFunc returns c_int).
+fn pollFired(data: ?*anyopaque) callconv(.c) c_int {
+    const link: *Link = @ptrCast(@alignCast(data.?));
+    if (link.events_client) |*ec| {
+        ec.requestResync();
+    }
+    return 1;
+}
+
 // ---------------------------------------------------------------------------
 // Callbacks — run on the UI thread by construction (GLib trampoline)
 // ---------------------------------------------------------------------------
@@ -245,6 +366,43 @@ fn onEvent(ctx: *anyopaque, envelope: types.EventEnvelope) void {
     store.applyEvent(envelope) catch |err| {
         std.log.err("herdr_link: applyEvent failed: {t}", .{err});
     };
+    // #84: schedule a debounced resync so the snapshot becomes the
+    // source of truth for agent_status.  The debounce coalesces N
+    // events in the 100 ms window into one `session.snapshot` call.
+    _ = scheduleResync(link);
+}
+
+/// Decide whether to schedule a resync.  Pure: only touches the flag,
+/// no GLib side effects.  Tests call this instead of `scheduleResync`
+/// so they never arm a real timer.
+fn shouldSchedule(link: *Link) bool {
+    if (link.resync_scheduled) return false;
+    link.resync_scheduled = true;
+    return true;
+}
+
+/// Schedule a debounced resync if one isn't already pending.
+/// Returns `true` if a new timeout was scheduled, `false` if one was
+/// already pending (coalescence).  Extracted from `onEvent` so tests
+/// can exercise the decision logic without a GLib main loop.
+fn scheduleResync(link: *Link) bool {
+    if (!shouldSchedule(link)) return false;
+    link.resync_source_id = glib.timeoutAddOnce(100, &debounceFired, link);
+    return true;
+}
+
+/// `glib.SourceOnceFunc` (glib2.zig:25660): returns void — a "once"
+/// source removes itself, no `G_SOURCE_REMOVE` to return.
+///
+/// Order matters: clear `resync_scheduled` BEFORE requesting the resync,
+/// so that an event arriving during the resync can schedule the next one.
+fn debounceFired(data: ?*anyopaque) callconv(.c) void {
+    const link: *Link = @ptrCast(@alignCast(data.?));
+    link.resync_source_id = null;
+    link.resync_scheduled = false;
+    if (link.events_client) |*ec| {
+        ec.requestResync();
+    }
 }
 
 fn onResynced(ctx: *anyopaque, snapshot: types.SessionSnapshot) void {
@@ -480,4 +638,67 @@ test "GlibDispatcher: task runs on the main-context thread, not the caller" {
     // NOT on the worker thread that called invoke.
     const test_thread_id = std.Thread.getCurrentId();
     try testing.expectEqual(test_thread_id, task_thread_id);
+}
+
+test "debounce: dos eventos seguidos programan un solo timeout" {
+    // #84: exercises the debounce decision logic without a GLib main
+    // loop.  `shouldSchedule` is the pure decision; `scheduleResync` is
+    // the effect (arms a GLib timer).  This test calls `shouldSchedule`
+    // ONLY, never `scheduleResync`, because arming a real GLib timer
+    // would register a callback pointing at this stack-allocated `Link`.
+    // When the test ends, `link` dies, but the timer stays armed.  Later
+    // tests pump the main context (`pumpUntilDrained`), the orphaned
+    // timer fires, `debounceFired` dereferences the dead pointer, and
+    // the suite crashes at herdr_link.zig:325 — the same use-after-free
+    // that `stop()` now prevents in production by cancelling the source.
+    //
+    // Tercera vez que este archivo tropieza con RECURSOS DE TEST QUE
+    // SOBREVIVEN A SU ESTADO EN LA PILA, aunque el recurso cambie: las dos
+    // primeras fueron `accept`s de un servidor herdr falso que colgaban la
+    // suite (líneas 424-436); esta es un timer de GLib. El modo de fallo no
+    // es el mismo, la familia sí.
+    // The rule: if your test doesn't need a GLib main loop, don't touch
+    // one.  Test the pure logic; leave the timer wiring to integration.
+    var link: Link = .{};
+
+    // First call: must schedule (returns true), flag must be set.
+    try testing.expect(shouldSchedule(&link));
+    try testing.expect(link.resync_scheduled);
+
+    // Second call immediately: must NOT schedule (returns false),
+    // flag still set — coalescence.
+    try testing.expect(!shouldSchedule(&link));
+    try testing.expect(link.resync_scheduled);
+
+    // Simulate the debounce firing: clear the flag, as debounceFired does.
+    link.resync_scheduled = false;
+    try testing.expect(!link.resync_scheduled);
+
+    // Now a third call must schedule again — the previous debounce
+    // cycle is complete.
+    try testing.expect(shouldSchedule(&link));
+    try testing.expect(link.resync_scheduled);
+}
+
+test "sondeo: stop() cancela tambien el source periodico" {
+    // Verifies that `stop()` clears `poll_source_id`.  We do NOT arm a
+    // real GLib source here — this file has tropezado TRES VECES with
+    // test resources that outlive their stack-allocated state (lines
+    // 424-436: fake herdr server accepts that hung the suite; the
+    // debounce test: a GLib timer that would fire on a dead Link).
+    // Arming a real `glib.timeoutAdd` would register a callback
+    // pointing at this stack-allocated `Link`; when the test ends the
+    // timer stays armed, fires on freed memory, and the suite crashes.
+    //
+    // Instead: set the field to a non-null value by hand, call stop(),
+    // and verify the cleanup logic nullifies it.  The actual arming
+    // happens in `armPollTrampoline` on the UI thread and is exercised
+    // by the integration gate against a real herdr.
+    var link: Link = .{};
+    link.poll_source_id = 42; // simulate an armed poll
+    try testing.expect(link.poll_source_id != null);
+
+    link.stop();
+
+    try testing.expectEqual(@as(?c_uint, null), link.poll_source_id);
 }
