@@ -257,3 +257,74 @@ Wayland con el guion de QA. Su rastro son las obligaciones 1-3.
 - **p95 de 105 ms medido con 14 panes.** No se sabe cómo escala a una sesión de 50. Si escalara mal,
   el margen de 2× sobre los 500 ms se come; se vuelve a medir cuando exista una sesión así.
 - **El desempate por `revision` deja de ser inmediato** — ver arriba, va a `CONCERNS.md`.
+
+---
+
+## ADENDA (2026-09-02) — la opción C vuelve, y la premisa del issue era falsa
+
+> Aprobado por: el dueño · 2026-09-02, tras fallar el gate de ventana real.
+
+El gate de ventana real falló: el sidebar tardaba **varios segundos** en reflejar un cambio de
+estado, no los 500 ms del criterio. La causa no es un bug de implementación — todo lo construido
+funciona— sino que **la premisa central del issue es falsa**.
+
+El issue dice que los eventos "solo señalan que algo cambió". Medido contra herdr 0.8.2:
+
+| Prueba | Resultado |
+|---|---|
+| Suscribirse a `pane.agent_status_changed` **sin** `pane_id` | rechazado: `missing field pane_id` |
+| Suscribirse **con** `pane_id` y cambiar el estado vía `report-agent` | **0 eventos** |
+| 55 s vigilando **agentes reales**; uno cambió `done → idle` en el snapshot | **0 eventos** `pane_agent_status_changed`, 46 `pane_updated` |
+
+**`pane.agent_status_changed` está en el esquema pero esta versión de herdr no lo emite nunca.**
+No hay ningún evento que señale un cambio de estado de agente.
+
+Lo que kelpie estaba usando de señal era `pane.updated`, que se dispara con la **salida del terminal
+de cualquier pane**. De ahí el síntoma exacto: el retardo es "lo que tarde algún pane, cualquiera, en
+escribir algo". En sesión activa son milisegundos; en una tranquila se midieron **10 s con cero
+eventos**. El criterio de 500 ms es inalcanzable así, y no por implementación.
+
+### Qué cambia
+
+Se añade un **sondeo periódico de 300 ms** como suelo, conservando el rebote por evento como camino
+rápido. `Link` arma un `glib.timeoutAdd(300, …)` que llama a `EventsClient.requestResync()`; la
+coalescencia y el no-solapamiento ya los da el trabajador y no cambian.
+
+Peor caso: 300 ms de espera al siguiente tick + 105 ms de p95 de `session.snapshot` = **~405 ms**,
+dentro de los 500 ms con margen.
+
+### Por qué esto revierte la decisión del issue, y por qué está bien
+
+El issue descartó la opción C (sondeo) por **chatty**. Esa objeción era correcta entonces y **ya no
+lo es**, porque la guarda de huella que este mismo issue construyó la elimina: un sondeo cuyo
+snapshot no cambió sale temprano sin mutar el Store ni disparar `fireChanged`. El coste que queda es
+~3.3 peticiones/s a un socket unix local (p50 28 ms) desde un hilo que no es el de UI.
+
+Dicho de otro modo: la opción C se descartó por un coste que la defensa anti-churn de la opción B
+suprimió. Las dos juntas son la solución; ninguna sola lo era.
+
+### Firmas verificadas para la adenda
+
+| API | Fuente (`archivo:línea`) | ✅ |
+|---|---|---|
+| `g_timeout_add(p_interval: c_uint, p_function: glib.SourceFunc, p_data: ?*anyopaque) c_uint` | `…/src/glib2/glib2.zig:24387` | ✅ |
+| `pub const timeoutAdd = g_timeout_add;` | `…/src/glib2/glib2.zig:24388` | ✅ |
+| `pub const SourceFunc = *const fn (p_user_data: ?*anyopaque) callconv(.c) c_int;` | `…/src/glib2/glib2.zig:25606` | ✅ |
+| `pub const SOURCE_CONTINUE = true;` | `…/src/glib2/glib2.zig:26124` | ✅ |
+
+### Escenario Gherkin nuevo
+
+```gherkin
+Escenario 10: el sondeo garantiza el suelo aunque no haya ningún evento
+  Dado kelpie abierto y una sesión de herdr en silencio, sin salida de terminal en ningún pane
+  Cuando un agente cambia de estado
+  Entonces el sidebar lo refleja en menos de 500 ms
+  Y no hace falta que ningún otro pane escriba nada para que ocurra
+```
+
+### Riesgo declarado
+
+El sondeo hace que la app pida un snapshot ~3.3 veces por segundo **para siempre**, también con la
+ventana en segundo plano o minimizada. No se ha medido su efecto en batería. Mitigación evidente y
+no implementada aquí: suspender el sondeo cuando la ventana no está visible
+(`gtk.Widget.isVisible` / el estado del `AdwApplicationWindow`). Va a `CONCERNS.md`.
