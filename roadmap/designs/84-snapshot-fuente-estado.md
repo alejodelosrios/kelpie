@@ -290,8 +290,21 @@ Se añade un **sondeo periódico de 300 ms** como suelo, conservando el rebote p
 rápido. `Link` arma un `glib.timeoutAdd(300, …)` que llama a `EventsClient.requestResync()`; la
 coalescencia y el no-solapamiento ya los da el trabajador y no cambian.
 
-Peor caso: 300 ms de espera al siguiente tick + 105 ms de p95 de `session.snapshot` = **~405 ms**,
-dentro de los 500 ms con margen.
+Peor caso previsto: 300 ms de espera al siguiente tick + 105 ms de p95 de `session.snapshot`.
+
+**Ese cálculo resultó corto y se corrigió midiendo.** El trabajador de resync es SECUENCIAL: si el
+tick cae con un resync en vuelo, el nuevo espera. El peor caso real es
+`tick + resync en curso + resync nuevo`, que con 300 ms dio un caso medido de **563 ms** — fuera del
+criterio. Con el tick en **150 ms** el peor caso baja a ~360 ms.
+
+Medido en la ventana real con la app asentada, 12 transiciones consecutivas:
+
+| n | min | p50 | max | fallos |
+|---|---|---|---|---|
+| 12 | 41 ms | 161 ms | **251 ms** | 0 |
+
+Las dos primeras transiciones tras arrancar la app salen lentas (897 ms y 1294 ms medidos): es
+arranque en frío, desaparece en régimen. Declarado, no escondido.
 
 ### Por qué esto revierte la decisión del issue, y por qué está bien
 

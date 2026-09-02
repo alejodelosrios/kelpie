@@ -397,3 +397,21 @@ Formato: `- [YYYY-MM-DD] #issue — qué se vio · por qué no se arregló ahora
   actualiza en el siguiente repintado real · **decisión del PM**, no accidente: incluirlo costaría
   una reconstrucción completa del sidebar ~1/s para siempre, y filas que saltan solas bajo el cursor
   tampoco son mejor UX · pendiente de que el dueño de #16 objete si no está de acuerdo.
+
+- **El sondeo de 150 ms corre siempre, también con la ventana oculta**
+  (`ui/herdr_link.zig:armPollTrampoline`) · **qué es**: ~6.6 peticiones `session.snapshot`/s a un
+  socket unix local, para siempre, esté la ventana visible, minimizada o en otro espacio de trabajo ·
+  **por qué importa**: no se ha medido su efecto en batería en un portátil · **la mitigación
+  evidente, no implementada aquí**: suspender el sondeo cuando la ventana no está visible y
+  reanudarlo al volver. El rebote por evento seguiría cubriendo el caso visible-con-actividad ·
+  **por qué no se hizo en #84**: alcance; el issue ya revirtió una decisión de diseño y añadir
+  gestión de visibilidad es superficie nueva sin criterio que la exija.
+
+- **Las dos primeras transiciones tras arrancar tardan ~900-1300 ms** · medido en el gate de #84 ·
+  desaparece en régimen (p50 161 ms sobre 12 muestras) · no se investigó la causa: candidatos son la
+  ventana de `ensureRunning`, el momento en que se arma el sondeo, o el primer snapshot en frío.
+
+- **`done` es pegajoso en herdr**: `report-agent --state idle` sobre un pane que está en `done` deja
+  el snapshot en `done` (verificado tres veces el 2026-09-02) · no es un bug de kelpie, pero invalida
+  cualquier guion de prueba que asuma poder volver de `done` a `idle` · el gate de #84 tuvo que
+  excluir `done` de su secuencia por esto.

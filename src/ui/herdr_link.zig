@@ -317,13 +317,26 @@ const PollArmCtx = struct {
     link: *Link,
 };
 
-/// Runs on the UI thread (GLib trampoline).  Arms the periodic 300 ms
-/// poll that calls `requestResync()` unconditionally.
+/// Runs on the UI thread (GLib trampoline). Arma el sondeo periódico que
+/// llama a `requestResync()` pase lo que pase.
+///
+/// **150 ms, calibrado midiendo, no elegido de cabeza.** El diseño partió de
+/// 300 ms suponiendo que el peor caso era «un tick + el p95 del snapshot»
+/// (~405 ms). Medido en la ventana real, ese cálculo se queda corto porque el
+/// trabajador de resync es SECUENCIAL: si el tick cae con un resync en vuelo,
+/// el nuevo espera a que el anterior termine. El peor caso real es
+/// `tick + resync en curso + resync nuevo`, que con 300 ms daba ~510 ms y se
+/// midió un caso de 563 ms — fuera del criterio de 500 ms del issue.
+///
+/// Con 150 ms el peor caso baja a ~150 + 105 + 105 ≈ 360 ms, con margen. El
+/// coste sube a ~6.6 peticiones/s a un socket unix local (p50 28 ms) desde un
+/// hilo que no es el de UI, y la guarda de huella de `applySnapshot` hace que
+/// las que no traen cambios no toquen el Store ni repinten.
 fn armPollTrampoline(ctx: *anyopaque) void {
     const pc: *PollArmCtx = @ptrCast(@alignCast(ctx));
     // glib.timeoutAdd (glib2.zig:24388): returns c_uint source ID.
     // pollFired returns 1 (SOURCE_CONTINUE) so the source stays alive.
-    pc.link.poll_source_id = glib.timeoutAdd(300, &pollFired, pc.link);
+    pc.link.poll_source_id = glib.timeoutAdd(150, &pollFired, pc.link);
     pc.link.gpa.destroy(pc);
 }
 
