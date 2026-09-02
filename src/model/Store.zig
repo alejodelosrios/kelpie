@@ -192,7 +192,10 @@ pub const Store = struct {
         // stale silently. Test scenarios 7/8 pin both directions.
         const fp = computeFingerprint(snapshot);
         if (self.last_fingerprint) |last| {
-            if (fp == last) return; // No-op: nothing sidebar-relevant changed
+            if (fp == last) {
+                std.log.debug("applySnapshot: descartado por huella igual (fingerprint=0x{x})", .{fp});
+                return; // No-op: nothing sidebar-relevant changed
+            }
         }
 
         // Null out before any destructive mutation so a midway failure
@@ -203,27 +206,43 @@ pub const Store = struct {
         freeAgentEntries(self.gpa, &self.agents);
         self.agents.clearAndFree();
         for (snapshot.agents) |info| {
-            const key = AgentKey{
-                .device_id = try self.gpa.dupe(u8, "local"),
-                .pane_id = try self.gpa.dupe(u8, info.pane_id),
-            };
-            errdefer {
-                self.gpa.free(key.device_id);
-                self.gpa.free(key.pane_id);
-            }
+            // Build key fields one by one with errdefer after each allocation.
+            // A struct literal with inline `try dupe` leaks every prior field
+            // when a later dupe fails, because the errdefer that frees the
+            // literal's fields is never reached.
+            const device_id = try self.gpa.dupe(u8, "local");
+            errdefer self.gpa.free(device_id);
+            const pane_id = try self.gpa.dupe(u8, info.pane_id);
+            errdefer self.gpa.free(pane_id);
+            const workspace_id = try self.gpa.dupe(u8, info.workspace_id);
+            errdefer self.gpa.free(workspace_id);
+            const tab_id = try self.gpa.dupe(u8, info.tab_id);
+            errdefer self.gpa.free(tab_id);
+            const agent_opt = try dupeOptional(self.gpa, info.agent);
+            errdefer freeOptional(self.gpa, agent_opt);
+            const display_agent_opt = try dupeOptional(self.gpa, info.display_agent);
+            errdefer freeOptional(self.gpa, display_agent_opt);
+            const title_opt = try dupeOptional(self.gpa, info.title);
+            errdefer freeOptional(self.gpa, title_opt);
+            const tst_opt = try dupeOptional(self.gpa, info.terminal_title_stripped);
+            errdefer freeOptional(self.gpa, tst_opt);
+            const cwd_opt = try dupeOptional(self.gpa, info.cwd);
+            errdefer freeOptional(self.gpa, cwd_opt);
+
+            const key = AgentKey{ .device_id = device_id, .pane_id = pane_id };
             const agent = Agent{
-                .device_id = key.device_id,
-                .pane_id = key.pane_id,
-                .workspace_id = try self.gpa.dupe(u8, info.workspace_id),
-                .tab_id = try self.gpa.dupe(u8, info.tab_id),
+                .device_id = device_id,
+                .pane_id = pane_id,
+                .workspace_id = workspace_id,
+                .tab_id = tab_id,
                 .status = info.agent_status,
                 .revision = info.revision,
                 .focused = info.focused,
-                .agent = try dupeOptional(self.gpa, info.agent),
-                .display_agent = try dupeOptional(self.gpa, info.display_agent),
-                .title = try dupeOptional(self.gpa, info.title),
-                .terminal_title_stripped = try dupeOptional(self.gpa, info.terminal_title_stripped),
-                .cwd = try dupeOptional(self.gpa, info.cwd),
+                .agent = agent_opt,
+                .display_agent = display_agent_opt,
+                .title = title_opt,
+                .terminal_title_stripped = tst_opt,
+                .cwd = cwd_opt,
             };
             try self.agents.put(key, agent);
         }
@@ -232,30 +251,28 @@ pub const Store = struct {
         freeWorkspaceEntries(self.gpa, &self.workspaces);
         self.workspaces.clearAndFree();
         for (snapshot.workspaces) |ws| {
-            const key = WorkspaceKey{
-                .device_id = try self.gpa.dupe(u8, "local"),
-                .workspace_id = try self.gpa.dupe(u8, ws.workspace_id),
-            };
-            errdefer {
-                self.gpa.free(key.device_id);
-                self.gpa.free(key.workspace_id);
-            }
-            try self.workspaces.put(key, try dupeWorkspaceInfo(self.gpa, ws));
+            const device_id = try self.gpa.dupe(u8, "local");
+            errdefer self.gpa.free(device_id);
+            const workspace_id = try self.gpa.dupe(u8, ws.workspace_id);
+            errdefer self.gpa.free(workspace_id);
+            const ws_info = try dupeWorkspaceInfo(self.gpa, ws);
+            errdefer freeWorkspaceInfoStrings(self.gpa, ws_info);
+            const key = WorkspaceKey{ .device_id = device_id, .workspace_id = workspace_id };
+            try self.workspaces.put(key, ws_info);
         }
 
         // Tabs
         freeTabEntries(self.gpa, &self.tabs);
         self.tabs.clearAndFree();
         for (snapshot.tabs) |tab| {
-            const key = TabKey{
-                .device_id = try self.gpa.dupe(u8, "local"),
-                .tab_id = try self.gpa.dupe(u8, tab.tab_id),
-            };
-            errdefer {
-                self.gpa.free(key.device_id);
-                self.gpa.free(key.tab_id);
-            }
-            try self.tabs.put(key, try dupeTabInfo(self.gpa, tab));
+            const device_id = try self.gpa.dupe(u8, "local");
+            errdefer self.gpa.free(device_id);
+            const tab_id = try self.gpa.dupe(u8, tab.tab_id);
+            errdefer self.gpa.free(tab_id);
+            const tab_info = try dupeTabInfo(self.gpa, tab);
+            errdefer freeTabInfoStrings(self.gpa, tab_info);
+            const key = TabKey{ .device_id = device_id, .tab_id = tab_id };
+            try self.tabs.put(key, tab_info);
         }
 
         // Mutation succeeded: commit the fingerprint. If we get here via
@@ -263,6 +280,7 @@ pub const Store = struct {
         // next snapshot will be applied instead of incorrectly discarded.
         self.last_fingerprint = fp;
 
+        std.log.debug("applySnapshot: aplicado (agents={d}, fingerprint=0x{x})", .{ snapshot.agents.len, fp });
         fireChanged(&self.observers);
     }
 
@@ -1730,4 +1748,53 @@ test "computeFingerprint: campos adyacentes no se concatenan" {
     const fp_b = Store.computeFingerprint(snap_b);
 
     try testing.expect(fp_a != fp_b);
+}
+
+test "applySnapshot: un fallo a mitad no bloquea el siguiente snapshot" {
+    // Snapshot A: 2 agents
+    const agents_a = [_]types.AgentInfo{
+        makeAgentInfo("p1", .working, 1),
+        makeAgentInfo("p2", .idle, 2),
+    };
+    const snap_a = makeSnapshot(&agents_a, &.{}, &.{});
+
+    // Snapshot B: different agents (different fingerprint)
+    const agents_b = [_]types.AgentInfo{
+        makeAgentInfo("p3", .blocked, 3),
+        makeAgentInfo("p4", .done, 4),
+    };
+    const snap_b = makeSnapshot(&agents_b, &.{}, &.{});
+
+    // Step 1: Apply snapshot A with a normal allocator — must succeed.
+    var store = Store.init(testing.allocator);
+    defer store.deinit();
+
+    var obs = TestObserver{};
+    try store.addObserver(obs.observer());
+    try store.applySnapshot(snap_a);
+    try testing.expectEqual(@as(u32, 1), obs.changed_count);
+    try testing.expectEqual(@as(usize, 2), store.agents.count());
+
+    // Step 2: Apply snapshot B with a FailingAllocator that dies midway
+    // through reconstruction. We use a page_allocator backing so the
+    // FailingAllocator's internal bookkeeping doesn't itself need an allocator.
+    // fail_index=5: the first few dupes succeed (clearing old state), then
+    // one fails in the middle of rebuilding agent entries.
+    var fa = std.testing.FailingAllocator.init(testing.allocator, .{ .fail_index = 5 });
+    store.gpa = fa.allocator();
+
+    const result = store.applySnapshot(snap_b);
+    try testing.expectError(error.OutOfMemory, result);
+
+    // Step 3: Restore a sane allocator and re-apply snapshot A.
+    // The midway failure null'd last_fingerprint, so the guard must NOT
+    // discard this snapshot even though A was the last successful one.
+    store.gpa = testing.allocator;
+    obs.changed_count = 0;
+
+    try store.applySnapshot(snap_a);
+    try testing.expectEqual(@as(u32, 1), obs.changed_count);
+    try testing.expectEqual(@as(usize, 2), store.agents.count());
+    const key = AgentKey{ .device_id = "local", .pane_id = "p1" };
+    try testing.expect(store.agents.get(key) != null);
 }
