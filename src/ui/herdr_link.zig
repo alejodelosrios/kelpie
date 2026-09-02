@@ -161,17 +161,32 @@ pub const Link = struct {
         }
 
         if (self.startup_thread) |t| {
-            // ponytail: este join bloquea el hilo de UI, y el techo son ~28 s,
-            // no los ~13 que decía antes de que el auditor sumara el otro tramo:
-            // ~10 s de ventana de lanzamiento + ~3 s de `readHerdrStatus`
-            // (`ensureRunning`, herdr ausente), MÁS hasta 15 s si `stop()` llega
-            // con el lector dentro de `resync()` → `client.request`, porque
-            // `shutdown(.recv)` actúa sobre el fd de la suscripción y no
-            // desbloquea el de la petición (`client.zig:88`,
-            // `default_read_timeout_ms`). Peor caso: proceso zombi ~28 s tras
-            // cerrar la ventana. Cortarlo exige una costura cancelable en
-            // `LocalServer.ensureRunning` y otra en `client.request` — issue
-            // propio, fuera del territorio de ui-builder.
+            // ponytail: este join bloquea el hilo de UI, y el techo son ~43 s.
+            // Desglose, que ha crecido dos veces y conviene tener entero:
+            //   ~10 s  ventana de lanzamiento de `ensureRunning`
+            //   ~3 s   `readHerdrStatus` con herdr ausente
+            //   ~15 s  si `stop()` llega con el LECTOR dentro de `resync()`
+            //   ~15 s  si `stop()` llega con el TRABAJADOR de resync dentro de
+            //          `realResync` (#84)
+            //
+            // Los dos tramos de 15 s se suman porque `EventsClient.stop()`
+            // (`Events.zig:131`) hace DOS joins secuenciales: primero el
+            // trabajador, después el lector. Los dos acaban en
+            // `client.request(..., default_read_timeout_ms, ...)`
+            // (`client.zig:88` = 15_000 ms), y `shutdown(.recv)` actúa sobre el
+            // fd de la suscripción, no sobre el de la petición, así que no
+            // desbloquea ninguno de los dos.
+            //
+            // Y ojo a la PROBABILIDAD, que importa más que el techo: el tramo
+            // del lector solo se pagaba en la ventana de reconexión, mientras
+            // que el del trabajador se puede pagar en cualquier momento —
+            // #84 deja un resync en vuelo ~1/s en sesión activa. Cerrar la
+            // ventana contra un herdr que no responde congela la UI hasta 15 s
+            // de forma rutinaria, no excepcional.
+            //
+            // Cortarlo exige una costura cancelable en `LocalServer.ensureRunning`
+            // y otra en `client.request` — issue propio, fuera del territorio de
+            // ui-builder. Anotado en CONCERNS.md.
             t.join();
             self.startup_thread = null;
         }

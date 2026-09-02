@@ -125,9 +125,24 @@ pub const EventsClient = struct {
         self.resync_thread = try std.Thread.spawn(.{}, resyncWorker, .{self});
     }
 
-    /// Clean shutdown: marks `stopping`, unblocks a read in progress with
-    /// `shutdown(.recv)` on the active fd (same mechanism as
-    /// `client.zig:130-156`'s `Watchdog`), then joins the reader thread.
+    /// Clean shutdown, en DOS joins secuenciales: primero el trabajador de
+    /// resync, después el lector.
+    ///
+    /// 1. Marca `stopping`, y despierta al trabajador posteando el semáforo
+    ///    (sin eso, un trabajador dormido nunca ve `stopping` y el join no
+    ///    vuelve jamás).
+    /// 2. Joinea al trabajador. **Puede tardar hasta 15 s**: si estaba dentro
+    ///    de `realResync`, está bloqueado en `client.request` con
+    ///    `default_read_timeout_ms` (`client.zig:88`).
+    /// 3. Desbloquea la lectura en curso con `shutdown(.recv)` sobre el fd
+    ///    activo (mismo mecanismo que el `Watchdog` de `client.zig:130-156`)
+    ///    y joinea al lector. **Otros 15 s** si estaba en su propio `resync()`:
+    ///    `shutdown` actúa sobre el fd de la suscripción, no sobre el de la
+    ///    petición.
+    ///
+    /// O sea, este `stop()` aporta hasta ~30 s de los ~43 s de techo que
+    /// declara `Link.stop()` en `ui/herdr_link.zig`. Si cambias el orden o los
+    /// timeouts, ese comentario hay que actualizarlo.
     pub fn stop(self: *EventsClient) void {
         self.stopping.store(true, .release);
 

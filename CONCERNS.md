@@ -343,3 +343,57 @@ Formato: `- [YYYY-MM-DD] #issue — qué se vio · por qué no se arregló ahora
   nuevo y no verlo aparecer es visible y desconcierta · dispara: **#84**, cuyo mecanismo de resync
   con rebote lo cierra de paso — al llegar cualquier evento se pide snapshot, y el snapshot sí trae
   la identidad. Si #84 se implementa como está descrito, esta fila se cierra con él; verificarlo.
+
+---
+
+## #84 — el snapshot como única fuente de `agent_status` (2026-09-01)
+
+- **El techo de bloqueo del hilo de UI al cerrar sube a ~43 s, y su probabilidad sube mucho más**
+  (`ui/herdr_link.zig:163-190`, `herdr/Events.zig:131`) · lo levantó el auditor de #84 · **qué es**:
+  `EventsClient.stop()` hace dos joins secuenciales —trabajador de resync, luego lector— y los dos
+  pueden acabar en `client.request` con `default_read_timeout_ms` = 15 s (`client.zig:88`), que
+  `shutdown(.recv)` no desbloquea porque actúa sobre el fd de la suscripción, no el de la petición ·
+  **por qué importa**: el tramo del lector solo se pagaba en la ventana de reconexión; el del
+  trabajador se paga en cualquier momento, porque #84 deja un resync en vuelo ~1/s en sesión activa.
+  Cerrar la ventana contra un herdr que no responde congela la UI hasta 15 s de forma rutinaria ·
+  **el arreglo real**: una costura cancelable en `client.request` y otra en
+  `LocalServer.ensureRunning`. Issue propio · **mitigación barata mientras tanto**: bajar el timeout
+  de `realResync` (p95 medido 105 ms contra un timeout de 15 s). No se hizo en #84 porque el lector
+  usa la misma función en frío y los 105 ms se midieron con 14 panes.
+
+- **La huella compara snapshot contra snapshot, no snapshot contra Store** (`model/Store.zig:193`) ·
+  **qué es**: si un evento mete una divergencia en el Store, un snapshot idéntico al anterior se
+  descarta y no la repara. La propiedad real que da #84 es "el snapshot es la verdad **cuando el
+  snapshot cambia**", no "el snapshot es la verdad siempre" · **por qué importa hoy poco**: tras #84
+  ningún evento escribe `status`, y el replay converge · **cuándo importaría**: en cuanto un evento
+  vuelva a mutar algo que la huella cubra.
+
+- **El no-solapamiento vale entre resyncs del trabajador, no globalmente** (`herdr/Events.zig:230`) ·
+  el hilo lector sigue llamando a `realResync` por su cuenta al abrir conexión · el diagrama del
+  diseño (`roadmap/designs/84-snapshot-fuente-estado.md`) lo omite y debería decirlo.
+
+- **`scheduleResync`/`debounceFired` no los ejercita ningún test** (`ui/herdr_link.zig:283-300`) ·
+  el test solo llama a `shouldSchedule`, la mitad pura · **y es deliberado**: la alternativa es armar
+  timers de GLib en tests, que ya provocó un use-after-free en este mismo archivo (tercera vez, ver
+  el comentario de sus líneas 344-356) · el temporizador de 100 ms real solo se cubre en el gate de
+  ventana real.
+
+- **Los tres bucles de `applySnapshot` usan `put`** (`model/Store.zig:247`, `:265`, `:283`) · un
+  `pane_id`/`workspace_id`/`tab_id` repetido dentro del mismo snapshot conserva la key vieja y filtra
+  · misma familia que el `fetchPut` que denegó la auditoría de #12 · preexistente, pero los tres
+  bucles se reescribieron en #84 sin cerrarlo.
+
+- **`onTransition` queda como código muerto en producción** · tras #84 `upsertAgent` ya no dispara
+  transiciones y el único emisor vivo sería `pane_agent_status_changed`, que no está suscrito
+  (`herdr/Events.zig:73-95`) · el comentario de `ui/sidebar.zig:389-391` ya no dice la verdad ·
+  **ojo**: #18 (notificaciones) se cuelga precisamente de `onTransition`, así que esto hay que
+  resolverlo **antes** de empezarlo, no después.
+
+- **`onEvent` no comprueba `link.stopping` antes de armar el timer** (`ui/herdr_link.zig:277`) · un
+  evento que llegue durante el cierre programa un timeout que `stop()` puede no alcanzar a cancelar.
+
+- **La huella excluye `revision` a propósito** (`model/Store.zig:601`) · consecuencia: el desempate
+  por recencia dentro del mismo estado (`Store.zig:682-686`, de #16) deja de ser inmediato y se
+  actualiza en el siguiente repintado real · **decisión del PM**, no accidente: incluirlo costaría
+  una reconstrucción completa del sidebar ~1/s para siempre, y filas que saltan solas bajo el cursor
+  tampoco son mejor UX · pendiente de que el dueño de #16 objete si no está de acuerdo.
