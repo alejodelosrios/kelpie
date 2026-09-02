@@ -286,7 +286,7 @@ eventos**. El criterio de 500 ms es inalcanzable así, y no por implementación.
 
 ### Qué cambia
 
-Se añade un **sondeo periódico de 300 ms** como suelo, conservando el rebote por evento como camino
+Se añade un **sondeo periódico de 150 ms** como suelo (el diseño partió de 300 ms; la medición lo bajó — ver abajo), conservando el rebote por evento como camino
 rápido. `Link` arma un `glib.timeoutAdd(300, …)` que llama a `EventsClient.requestResync()`; la
 coalescencia y el no-solapamiento ya los da el trabajador y no cambian.
 
@@ -311,7 +311,7 @@ arranque en frío, desaparece en régimen. Declarado, no escondido.
 El issue descartó la opción C (sondeo) por **chatty**. Esa objeción era correcta entonces y **ya no
 lo es**, porque la guarda de huella que este mismo issue construyó la elimina: un sondeo cuyo
 snapshot no cambió sale temprano sin mutar el Store ni disparar `fireChanged`. El coste que queda es
-~3.3 peticiones/s a un socket unix local (p50 28 ms) desde un hilo que no es el de UI.
+~6.6 peticiones/s a un socket unix local (p50 28 ms) desde un hilo que no es el de UI.
 
 Dicho de otro modo: la opción C se descartó por un coste que la defensa anti-churn de la opción B
 suprimió. Las dos juntas son la solución; ninguna sola lo era.
@@ -337,7 +337,7 @@ Escenario 10: el sondeo garantiza el suelo aunque no haya ningún evento
 
 ### Riesgo declarado
 
-El sondeo hace que la app pida un snapshot ~3.3 veces por segundo **para siempre**, también con la
+El sondeo hace que la app pida un snapshot ~6.6 veces por segundo **para siempre**, también con la
 ventana en segundo plano o minimizada. No se ha medido su efecto en batería. Mitigación evidente y
 no implementada aquí: suspender el sondeo cuando la ventana no está visible
 (`gtk.Widget.isVisible` / el estado del `AdwApplicationWindow`). Va a `CONCERNS.md`.

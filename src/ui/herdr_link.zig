@@ -114,14 +114,19 @@ pub const Link = struct {
     /// source pending (GLib source IDs are always > 0).
     resync_source_id: ?c_uint = null,
 
-    /// GLib source ID of the periodic poll (300 ms).  Exists because
-    /// herdr 0.8.2 does NOT emit `pane.agent_status_changed` — verified
-    /// three ways: without `pane_id` it rejects, with `pane_id` it gives
-    /// 0 events, and 55 s watching real agents gave 0 events while the
+    /// GLib source ID of the periodic poll (**150 ms** — el valor lo arma
+    /// `armPollTrampoline`, y ahí está el porqué de 150 y no 300).  Exists
+    /// because herdr 0.8.2 does NOT emit `pane.agent_status_changed` —
+    /// verified three ways: without `pane_id` it rejects, with `pane_id` it
+    /// gives 0 events, and 55 s watching real agents gave 0 events while the
     /// snapshot DID change.  The debounce-by-event path only fires when
     /// some pane writes terminal output; in a quiet session that can take
-    /// 10+ s.  This poll guarantees a ~405 ms worst case (300 ms tick +
-    /// 105 ms p95 of `session.snapshot`).
+    /// 10+ s.
+    ///
+    /// Peor caso MEDIDO en la ventana real, no calculado: 12 transiciones
+    /// consecutivas con la app asentada dan min 41 / p50 161 / **max 251 ms**,
+    /// contra el criterio de 500 ms del issue.  (El cálculo ingenuo de
+    /// «un tick + p95» daba ~405 ms y resultó FALSO: ver `armPollTrampoline`.)
     poll_source_id: ?c_uint = null,
 
     /// Resolve the socket, spawn a startup thread that calls
