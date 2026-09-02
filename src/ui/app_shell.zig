@@ -94,8 +94,10 @@ pub const kelpie_css =
     ".kelpie-row-title { color: var(--text-1); font-size: 13px; font-weight: 500; }\n" ++
     ".kelpie-row-subtitle { color: var(--text-2); font-size: 11.5px; }\n" ++
     ".kelpie-glyph-working { color: var(--status-working); }\n" ++
-    ".kelpie-glyph-blocked { color: var(--status-blocked); }\n" ++
-    ".kelpie-glyph-done { color: var(--status-done); }\n";
+    // Glifos Nerd Font (U+F0026, U+F012C): la fuente de UI del sistema no los
+    // tiene, así que sin font-family explícito se pinta un hueco.
+    ".kelpie-glyph-blocked { color: var(--status-blocked); font-family: \"JetBrainsMono Nerd Font\", \"JetBrainsMono NF\", monospace; }\n" ++
+    ".kelpie-glyph-done { color: var(--status-done); font-family: \"JetBrainsMono Nerd Font\", \"JetBrainsMono NF\", monospace; }\n";
 
 // Set once in run(), before gio.Application.run() hands control to GTK; read by
 // onActivate(). Single instance, single thread — no synchronization needed.

@@ -114,6 +114,16 @@ pub const Link = struct {
     /// source pending (GLib source IDs are always > 0).
     resync_source_id: ?c_uint = null,
 
+    /// GLib source ID of the periodic poll (300 ms).  Exists because
+    /// herdr 0.8.2 does NOT emit `pane.agent_status_changed` — verified
+    /// three ways: without `pane_id` it rejects, with `pane_id` it gives
+    /// 0 events, and 55 s watching real agents gave 0 events while the
+    /// snapshot DID change.  The debounce-by-event path only fires when
+    /// some pane writes terminal output; in a quiet session that can take
+    /// 10+ s.  This poll guarantees a ~405 ms worst case (300 ms tick +
+    /// 105 ms p95 of `session.snapshot`).
+    poll_source_id: ?c_uint = null,
+
     /// Resolve the socket, spawn a startup thread that calls
     /// `ensureRunning` (may block ~10 s) then `EventsClient.start()`.
     /// The startup thread publishes `Status.kind` to the UI via the
@@ -158,6 +168,14 @@ pub const Link = struct {
             _ = glib.Source.remove(id);
             self.resync_source_id = null;
             self.resync_scheduled = false;
+        }
+
+        // Cancel the periodic poll.  Same rationale as the debounce
+        // cancellation above: the source carries a pointer to this Link,
+        // and firing on a freed Link is a use-after-free.
+        if (self.poll_source_id) |id| {
+            _ = glib.Source.remove(id);
+            self.poll_source_id = null;
         }
 
         if (self.startup_thread) |t| {
@@ -254,6 +272,21 @@ fn startupThreadFn(link: *Link, io: std.Io, gpa: std.mem.Allocator, environ: *st
     link.events_client.?.start() catch |err| {
         std.log.err("herdr_link: EventsClient.start failed: {t}", .{err});
     };
+
+    // Arm the periodic poll from the UI thread.  We cannot call
+    // glib.timeoutAdd here — this is the startup thread, not the UI
+    // thread, and arming a GLib source from another thread is a race.
+    // The dispatcher enqueues `armPollTrampoline` onto the GLib main
+    // context, same pattern as `publishStatusTrampoline`.
+    const poll_ctx = gpa.create(PollArmCtx) catch {
+        std.log.err("herdr_link: failed to allocate PollArmCtx", .{});
+        return;
+    };
+    poll_ctx.* = .{ .link = link };
+    link.dispatcher.dispatcher().invoke(&armPollTrampoline, poll_ctx) catch {
+        std.log.err("herdr_link: dispatcher.invoke(armPoll) failed", .{});
+        gpa.destroy(poll_ctx);
+    };
 }
 
 /// Context for the status-publish trampoline.  Heap-allocated by the
@@ -277,6 +310,33 @@ fn publishStatusTrampoline(ctx: *anyopaque) void {
 pub var updateStatusLabel: *const fn (kind: LocalServer.Kind) void = &noopUpdateStatusLabel;
 
 fn noopUpdateStatusLabel(_: LocalServer.Kind) void {}
+
+/// Context for the poll-arming trampoline.  Heap-allocated by the
+/// startup thread, freed by the trampoline after it runs on the UI thread.
+const PollArmCtx = struct {
+    link: *Link,
+};
+
+/// Runs on the UI thread (GLib trampoline).  Arms the periodic 300 ms
+/// poll that calls `requestResync()` unconditionally.
+fn armPollTrampoline(ctx: *anyopaque) void {
+    const pc: *PollArmCtx = @ptrCast(@alignCast(ctx));
+    // glib.timeoutAdd (glib2.zig:24388): returns c_uint source ID.
+    // pollFired returns 1 (SOURCE_CONTINUE) so the source stays alive.
+    pc.link.poll_source_id = glib.timeoutAdd(300, &pollFired, pc.link);
+    pc.link.gpa.destroy(pc);
+}
+
+/// `glib.SourceFunc` (glib2.zig:25606): returns c_int.  Returns 1 to
+/// keep the source alive (SOURCE_CONTINUE is declared as bool `true`
+/// but SourceFunc returns c_int).
+fn pollFired(data: ?*anyopaque) callconv(.c) c_int {
+    const link: *Link = @ptrCast(@alignCast(data.?));
+    if (link.events_client) |*ec| {
+        ec.requestResync();
+    }
+    return 1;
+}
 
 // ---------------------------------------------------------------------------
 // Callbacks — run on the UI thread by construction (GLib trampoline)
@@ -600,4 +660,27 @@ test "debounce: dos eventos seguidos programan un solo timeout" {
     // cycle is complete.
     try testing.expect(shouldSchedule(&link));
     try testing.expect(link.resync_scheduled);
+}
+
+test "sondeo: stop() cancela tambien el source periodico" {
+    // Verifies that `stop()` clears `poll_source_id`.  We do NOT arm a
+    // real GLib source here — this file has tropezado TRES VECES with
+    // test resources that outlive their stack-allocated state (lines
+    // 424-436: fake herdr server accepts that hung the suite; the
+    // debounce test: a GLib timer that would fire on a dead Link).
+    // Arming a real `glib.timeoutAdd` would register a callback
+    // pointing at this stack-allocated `Link`; when the test ends the
+    // timer stays armed, fires on freed memory, and the suite crashes.
+    //
+    // Instead: set the field to a non-null value by hand, call stop(),
+    // and verify the cleanup logic nullifies it.  The actual arming
+    // happens in `armPollTrampoline` on the UI thread and is exercised
+    // by the integration gate against a real herdr.
+    var link: Link = .{};
+    link.poll_source_id = 42; // simulate an armed poll
+    try testing.expect(link.poll_source_id != null);
+
+    link.stop();
+
+    try testing.expectEqual(@as(?c_uint, null), link.poll_source_id);
 }
