@@ -89,82 +89,87 @@ Al aprobar, estampa en la cabecera quién aprobó de verdad: `Aprobado por: orqu
 como `PENDIENTE DE APROBACIÓN` a propósito: firmar por alguien que no lo vio es un registro falso.
 Commitea el diseño ya aprobado antes del Apply.
 
-## FASE 4 — Apply (OpenCode + MiMo v2.5-pro)
+## FASE 4 — Apply (Claude Code como arnés, MiMo como modelo)
 
-**Smoke test primero, siempre** (el gotcha que arruina todo lo demás):
+Los builders corren con `scripts/kelpie-builder`, que lanza `claude --print` apuntando al endpoint
+Anthropic de MiMo. El rol de cada uno vive en `.claude/builders/<agente>.md` y se inyecta con
+`--append-system-prompt`.
 
 ```sh
-opencode run --agent core-builder "responde solo PONG"
+scripts/kelpie-builder <core-builder|ui-builder|docs-writer> <archivo-de-prompt> [--resume <id>]
 ```
 
-Confirma en la línea de estado `> core-builder · mimo/mimo-v2.5-pro`. Si aparece `build` o otro
-modelo, el agente cayó al default en silencio → **NO CONFÍES EN EL RESULTADO**: revisa que su
-frontmatter diga `mode: primary` y que el provider `mimo` exista en `~/.config/opencode/opencode.json`.
-Si el provider no está configurado, ve directo al fallback Claude y avisa al humano.
+Escribe el prompt a un **archivo** (no inline): sobrevive a la sesión y se puede reenviar tal cual.
+La salida es JSON en stdout —los avisos van a stderr— y su `session_id` es lo que necesitas para la
+ronda siguiente.
 
-Si el builder reporta `permission requested: external_directory … auto-rejecting`, **para**: se
-quedó sin poder leer el mirror pinneado, o sea sin su única fuente de firmas. No lo dejes seguir "a
-ver qué sale" — eso es exactamente escribir de memoria. El permiso vive en el frontmatter del agente
-(`external_directory`), abierto solo a su fuente de verdad; si el mirror cambió de ruta, actualízalo
-ahí antes de relanzar.
+**Modelos por agente**, fijados en el wrapper y no negociables desde el prompt:
+
+| Agente | Modelo | Por qué |
+|---|---|---|
+| `core-builder` | `mimo-v2.5-pro[1m]` | firmas de API, el trabajo caro |
+| `ui-builder` | `mimo-v2.5-pro[1m]` | ídem, más GTK generado |
+| `docs-writer` | `mimo-v2.5[1m]` | prosa verificada, no firmas: no necesita el caro |
+
+El sufijo `[1m]` **no es cosmético**: sin él Claude Code asume 200k y auto-compacta un contexto que
+es de 1 048 576.
+
+**Smoke test antes del primer Apply de un issue**, igual que antes:
+
+```sh
+echo "Responde SOLO: PONG" > /tmp/smoke.txt
+scripts/kelpie-builder core-builder /tmp/smoke.txt 2>/dev/null | \
+  python3 -c "import json,sys; d=json.load(sys.stdin); print(d['result'], list(d['modelUsage'])[0])"
+```
+
+Debe imprimir `PONG mimo-v2.5-pro[1m]`. Si el modelo no es ése, para: el wrapper no está leyendo la
+credencial o el endpoint cambió.
+
+**La ronda de corrección va SIEMPRE con `--resume <session_id>`.** Es la razón por la que existe este
+arnés: el builder conserva lo que ya escribió, las firmas que verificó y dónde se atascó. Escribirle
+"segunda ronda sobre tu trabajo" a un proceso nuevo es pedirle algo que no puede saber — con
+`opencode run` eso produjo un `exit 0` sin ediciones que el PM contó como muerte del motor y costó un
+fallback que no hacía falta (lecciones de #84).
 
 Reparto de territorio (**file-sets disjuntos, sin excepción**):
 
 | Builder | Territorio |
 |---|---|
-| `core-builder` | `src/terminal/`, `src/rpc/`, `src/pty/`, `src/ssh/`, `src/font/` — labels `area:vt,render,pty,rpc,ssh,font` |
-| `ui-builder` | `src/ui/`, `src/omarchy/`, `PKGBUILD`, `.github/` — labels `area:ui,omarchy,pkg` |
+| `core-builder` | `src/terminal/`, `src/rpc/`, `src/pty/`, `src/ssh/`, `src/font/`, `src/model/`, `src/herdr/` + hotspots `build.zig`, `src/main.zig`, `src/app.zig` |
+| `ui-builder` | `src/ui/`, `src/omarchy/`, `PKGBUILD`, `.github/` |
 | `docs-writer` | `docs/`, `README.md`, `CHANGELOG.md` — nunca código |
 
-**Los hotspots tienen dueño, y no eres tú.** `build.zig`, `build.zig.zon`, `src/main.zig` y
-`src/app.zig` no caen en ninguna carpeta de la tabla, y ahí es donde el Apply se escapa: el hijo se
-queda sin dueño declarado y escribe el código él mismo, en silencio, sin desobedecer nada.
-Asignación explícita:
+Un issue cuyos archivos son **solo** hotspots sigue yendo al `core-builder`.
 
-| Hotspot | Dueño |
-|---|---|
-| `build.zig`, `build.zig.zon`, `src/main.zig`, `src/app.zig` | `core-builder` |
-| `.github/workflows/*` | `ui-builder` (territorio `.github/`), salvo que el issue sea solo de CI |
-
-Un issue cuyos archivos son **solo** hotspots (los spikes de bootstrap, típicamente) sigue yendo al
-`core-builder`: que el archivo no viva en `src/terminal/` no lo convierte en trabajo del PM.
+Si un issue cruza territorios, **secuencia**: primero core, verificas, commiteas, luego ui. Nunca los
+dos a la vez sobre el mismo checkout.
 
 **Escribir el Apply tú mismo es la excepción, no el atajo**, y solo vale para: (a) shell/`scripts/`
 puro, (b) el fallback documentado tras dos intentos fallidos del builder. En ambos casos el estado
-debe quedar escrito: `intentos_apply` y el motivo. Un `intentos_apply: 0` en un issue con código Zig
-es un Apply que nunca ocurrió — el PM lo rechaza y lo manda al builder.
+debe quedar escrito: `intentos_apply` y el motivo.
 
-Si un issue cruza territorios (p.ej. #35 lleva `area:ssh` + `area:ui`), **secuencia**: primero core,
-verificas, commiteas, luego ui. Nunca los dos a la vez sobre el mismo checkout.
+### Cómo se lanza y cómo se vigila
 
-Lanza con el diseño aprobado como orden. **Dos detalles de la invocación no son opcionales**, y
-los dos se aprendieron midiendo (Ola 1 de M1):
+**El Apply va SIEMPRE a background.** La herramienta Bash recorta a 600 s **sin avisar**, así que un
+`timeout` mayor es ficción: mata a un builder sano a mitad y deja el árbol a medias.
 
 ```sh
-script -qefc "opencode run --agent <builder> \"$(cat roadmap/designs/<N>-<slug>.md)
-
-Implementa esta spec. Reporta la tabla de citas obligatoria.\"" apply-<N>.log
+nohup timeout 3600 scripts/kelpie-builder core-builder apply-<N>.txt > apply-<N>.json 2>&1 &
 ```
 
-1. **Va bajo `script` (pseudo-TTY), nunca por una tubería pelada.** OpenCode **bufferea su stdout por
-   bloques cuando no escribe a una TTY**: medido, un run matado a los 15 s deja **42 bytes** de log
-   (solo la cabecera) por una tubería, y ~11× más bajo `script`. `stdbuf -oL` **no** sirve — no usa
-   stdio de libc. Sin el pty, un builder que trabaja bien se ve exactamente igual que uno colgado.
-2. **El timeout se calcula, no se copia.** En este repo un Apply real cuesta: prompt del diseño
-   (cientos de líneas) + una verificación `sed` por cada firma de la tabla + `zig build` (~75 s en
-   frío) + `zig build test` (**~92 s de reloj**), y **dentro de un worktree todo va ~2× más lento**
-   (medido: 24 s → 54 s en la misma tarea trivial). `timeout 900` mata a un builder sano a mitad de
-   la verificación. Usa **2400 s** como base y súbelo si el diseño tiene tabla de citas larga.
-
-**El progreso NO se mide en bytes de log.** Se mide en el árbol:
+**El progreso se mide en el árbol y en el transcript, nunca en el reloj:**
 
 ```sh
-git -C <worktree> status --short     # ¿aparecieron archivos?
-find <worktree>/src -newer <marca> ! -path "*/.zig-cache/*"   # ¿se tocó algo?
+git status --short | awk 'NF'                       # ¿aparecieron archivos?
+wc -l ~/.claude/projects/<proyecto-slug>/<session-id>.jsonl   # ¿sigue actuando?
 ```
 
-Un log vacío con `git status` vacío **a los 40 min** es un builder muerto. Un log vacío a los 10 min
-no es nada: es el buffer.
+El `.jsonl` de la sesión se escribe **en vivo**, herramienta a herramienta, y es la vigilancia real.
+`--output-format json` no sirve para eso: no emite nada hasta terminar.
+
+**Reparte el trabajo en tareas de una pieza.** Medido en #84: MiMo cumple "implementa esto desde
+cero" a la primera, y abandona con listas de cuatro correcciones. Si tienes cuatro arreglos, o van en
+cuatro invocaciones, o van encadenados con `--resume`.
 
 ## FASE 5 — Verificación sobre confianza
 
@@ -187,6 +192,16 @@ El reporte del builder **no es evidencia**. En este orden:
    (`core-builder-fallback` / `ui-builder-fallback`). Incrementa `intentos_apply` en el state file y
    anota el motivo en `CONCERNS.md`. **Dos fallbacks seguidos en el mismo issue → párate y avisa al
    humano**: el problema es la spec, no el modelo.
+
+   > 🔴 **Antes de contar un fallo del motor, enumera tus propias causas instrumentales.** En #84 el
+   > PM contó dos fallos de MiMo y disparó un fallback que el humano tuvo que parar; **ninguno de los
+   > dos era del modelo**. Comprueba, en este orden:
+   > - ¿le hablaste de "tu trabajo anterior" sin `--resume`? Entonces le pediste algo que no puede saber.
+   > - ¿lo lanzaste en primer plano? La Bash recorta a 600 s y lo mataste tú.
+   > - ¿su log está vacío o repite el mismo comando de lectura? Mira **qué** comando: `grep` está roto
+   >   en esta máquina y devuelve vacío, así que el builder puede estar **ciego**, no atascado.
+   >
+   > Un Apply incompleto —archivos del diseño que faltan en el diff— **sí** es fallback legítimo.
 
    **Antes de declarar un fallback por "el builder no produjo nada", comprueba las dos causas
    instrumentales primero** — en la Ola 1 de M1 las dos se confundieron con un motor roto y costaron

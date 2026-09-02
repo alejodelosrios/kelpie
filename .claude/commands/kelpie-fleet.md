@@ -152,10 +152,18 @@ y el ruleset les exigirá rebase. Avísales en cuanto pase; no esperes a que su 
 **No mates a un hijo por reloj.** Un QA visual riguroso tarda. Mata por **falta de progreso**: sin
 cambios en su diff ni en su pane durante varios ciclos, no por minutos transcurridos.
 
-**Y "sin progreso" se mide en el árbol, no en el log.** OpenCode bufferea su stdout por bloques
-cuando no escribe a una TTY: un builder sano matado a los 15 s deja **42 bytes** de log. Si el hijo
-lanzó su Apply sin `script -qefc`, su log vacío no dice nada. Lo que dice algo es
-`git -C ../kelpie-<N> status --short`.
+**Y "sin progreso" se mide en el árbol y en el transcript, no en el reloj.** Los builders corren
+con `scripts/kelpie-builder`, que lanza `claude --print`. Su `--output-format json` **no emite nada
+hasta terminar**, así que el fichero de salida vacío no dice nada. Lo que sí dice algo:
+
+```sh
+git -C ../kelpie-<N> status --short | awk 'NF'                    # ¿aparecieron archivos?
+wc -l ~/.claude/projects/<proyecto-slug>/<session-id>.jsonl        # ¿sigue actuando?
+```
+
+El `.jsonl` de la sesión se escribe **en vivo**, herramienta a herramienta. Es la única vigilancia
+fiable de un builder, y distingue las tres cosas que desde fuera se ven iguales: trabajando,
+esperando, y muerto.
 
 ## FASE 3b — La regla de merge del orquestador
 

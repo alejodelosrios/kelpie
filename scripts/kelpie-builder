@@ -1,0 +1,62 @@
+#!/usr/bin/env bash
+# Lanza un builder de kelpie: Claude Code como arnés, MiMo como modelo.
+#
+#   scripts/kelpie-builder <core-builder|ui-builder|docs-writer> <archivo-de-prompt> [--resume <session-id>]
+#
+# Imprime en stdout el JSON de resultado de `claude --print`. El `session_id` de
+# ese JSON es lo que se le pasa a `--resume` para una ronda de corrección: el
+# builder conserva TODO su contexto —lo que ya escribió, las firmas que
+# verificó, dónde se atascó— en vez de arrancar de cero.
+#
+# Por qué existe este arnés y no `opencode run` (issue #85, medido en #84):
+#   - `opencode run` no tiene memoria entre invocaciones. Un prompt de "segunda
+#     ronda" hacía que el builder leyera el árbol, encontrara la spec ya
+#     implementada por su ronda anterior —que no recordaba— y saliera exit 0 sin
+#     editar. El PM lo contaba como muerte del motor y disparaba un fallback que
+#     no hacía falta.
+#   - OpenCode bufferea stdout por bloques fuera de una TTY, así que todo Apply
+#     iba envuelto en `script -qefc` y el progreso no se podía medir por el log.
+#   - El builder no veía las skills del repo, que son justo el contrato de APIs
+#     que más falta le hace a un modelo externo en este stack.
+set -euo pipefail
+
+AGENTE="${1:?uso: kelpie-builder <agente> <archivo-de-prompt> [--resume <id>]}"
+PROMPT_FILE="${2:?falta el archivo de prompt}"
+shift 2
+
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROL="$REPO_ROOT/.claude/builders/$AGENTE.md"
+[[ -f "$ROL" ]] || { echo "kelpie-builder: no existe el rol $ROL" >&2; exit 2; }
+[[ -f "$PROMPT_FILE" ]] || { echo "kelpie-builder: no existe el prompt $PROMPT_FILE" >&2; exit 2; }
+
+# --- Modelo por agente -------------------------------------------------------
+# El sufijo [1m] NO es cosmético: sin él Claude Code asume una ventana de 200k y
+# auto-compacta un contexto que en realidad es de 1 048 576.
+case "$AGENTE" in
+  docs-writer) MODELO="mimo-v2.5[1m]" ;;   # el barato: prosa, no firmas de API
+  *)           MODELO="mimo-v2.5-pro[1m]" ;;
+esac
+
+# --- Credencial --------------------------------------------------------------
+# Nunca en un archivo versionado. `git grep` de un prefijo de la clave sobre el
+# árbol no debe devolver nada.
+KEY="${MIMO_API_KEY:-}"
+if [[ -z "$KEY" && -r "$HOME/.config/kelpie/mimo.key" ]]; then
+  KEY="$(< "$HOME/.config/kelpie/mimo.key")"
+fi
+[[ -n "$KEY" ]] || { echo "kelpie-builder: sin credencial. Pon MIMO_API_KEY o ~/.config/kelpie/mimo.key" >&2; exit 3; }
+
+BASE_URL="${MIMO_BASE_URL:-https://token-plan-sgp.xiaomimimo.com/anthropic}"
+
+cd "$REPO_ROOT"
+exec env -u ANTHROPIC_API_KEY \
+  ANTHROPIC_BASE_URL="$BASE_URL" \
+  ANTHROPIC_AUTH_TOKEN="$KEY" \
+  ANTHROPIC_MODEL="$MODELO" \
+  ANTHROPIC_SMALL_FAST_MODEL="mimo-v2.5" \
+  claude --print \
+    --append-system-prompt "$(cat "$ROL")" \
+    --permission-mode acceptEdits \
+    --allowedTools "Read,Edit,Write,Glob,Grep,Bash" \
+    --output-format json \
+    "$@" < "$PROMPT_FILE"

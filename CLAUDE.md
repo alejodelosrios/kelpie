@@ -68,9 +68,9 @@ con spec, firmas citadas y escenarios Gherkin, aprobado **antes** de escribir c�
 | Rol | Motor | Dónde |
 |---|---|---|
 | Orquestador / PM | Claude (Opus en fleet, Sonnet en hijos) | `.claude/commands/` |
-| `core-builder` (`vt,render,pty,rpc,ssh,font`) | OpenCode + `mimo-v2.5-pro` | `.opencode/agents/` |
-| `ui-builder` (`ui,omarchy,pkg`) | OpenCode + `mimo-v2.5-pro` | `.opencode/agents/` |
-| `docs-writer` | OpenCode + `mimo-v2.5-pro` | `.opencode/agents/` |
+| `core-builder` (`vt,render,pty,rpc,ssh,font`) | Claude Code + `mimo-v2.5-pro` | `.claude/builders/` |
+| `ui-builder` (`ui,omarchy,pkg`) | Claude Code + `mimo-v2.5-pro` | `.claude/builders/` |
+| `docs-writer` | Claude Code + `mimo-v2.5` (el barato) | `.claude/builders/` |
 | `qa` | Claude Sonnet | `.claude/agents/` |
 | `auditor` | Claude **Opus** — nunca se abarata | `.claude/agents/` |
 | Fallbacks de builder | Claude Sonnet | `.claude/agents/` |
