@@ -415,3 +415,34 @@ Formato: `- [YYYY-MM-DD] #issue — qué se vio · por qué no se arregló ahora
   el snapshot en `done` (verificado tres veces el 2026-09-02) · no es un bug de kelpie, pero invalida
   cualquier guion de prueba que asuma poder volver de `done` a `idle` · el gate de #84 tuvo que
   excluir `done` de su secuencia por esto.
+
+- **`attach.attachOrLogMismatch` no acepta un `StatusReader` inyectable** (`herdr/attach.zig:75`) ·
+  llama directamente a `LocalServer.readHerdrStatus`, así que el escenario Gherkin de #19 "protocol
+  mismatch no abre una ventana" **no tiene cobertura automática** — solo se verifica con un `herdr`
+  real reportando `compatible: false`, o a mano · `LocalServer.ensureRunning` ya resuelve el mismo
+  problema con `pub const StatusReader = *const fn(...) ?ServerCompat` como parámetro inyectado
+  (`herdr/LocalServer.zig:63`, tests en líneas 442-501) · **la mitigación evidente, no implementada
+  aquí**: darle a `attachOrLogMismatch` la misma forma,
+  `attachOrLogMismatch(io, gpa, environ, pane, status_reader: LocalServer.StatusReader)`, con
+  `readHerdrStatus` como valor por defecto en el call site de producción (`ui/app_shell.zig`) ·
+  detectado por QA en #19, no arreglado por decisión de alcance (el diseño de #19 no lo pedía).
+
+- **Sin debounce ni deduplicación por `pane` en el attach del sidebar** (#19,
+  `ui/app_shell.zig:onSidebarActivated`) · cada click lanza un hilo detached propio y un `herdr
+  status --json` de hasta 3 s; N clicks rápidos sobre la misma fila son N hilos y N subprocesos en
+  vuelo · inofensivo hoy porque `omarchy-launch-or-focus` deduplica la *ventana* por `app-id`, y el
+  diseño de #19 no pidió debounce · anotado por si el attach remoto de M3 (SSH) sube el coste por
+  click lo suficiente como para justificarlo.
+
+- **Hilos detached de attach sin dueño de ciclo de vida al cerrar la app** (#19,
+  `ui/app_shell.zig:onSidebarActivated` + `src/main.zig` que hace `std.process.exit(...)` al salir) ·
+  un attach en vuelo al cerrar kelpie se corta a mitad de camino, sin join ni cancelación · sin daño
+  observado (no hay `deinit` con el que pueda carrerear, y el proceso huérfano de `herdr status` lo
+  recoge el sistema), pero es el segundo hilo del repo sin dueño de ciclo de vida — detectado por el
+  auditor de #19.
+
+- **El test flaky de `LocalServer.zig` (`errno 111`, ya documentado arriba) hace el gate mecánico no
+  determinista** · confirmado de nuevo en #19: 2 de 3 corridas de `zig build test` en worktree
+  fallaron ahí, 0 relacionadas con el diff de #19 · sigue sin arreglarse (mismo alcance ya declarado
+  fuera de #81/#84), pero cada issue que lo vuelve a pisar es una ronda de verificación perdida
+  reconfirmando lo mismo.

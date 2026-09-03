@@ -111,4 +111,16 @@ pub fn build(b: *std.Build) void {
     });
     const events_tests = b.addTest(.{ .root_module = events_mod });
     test_step.dependOn(&b.addRunArtifact(events_tests).step);
+
+    // attach (#19): lo importa `app_shell.zig`, pero `zig build test` solo descubre tests en
+    // main.zig y sus imports DIRECTOS — un import de segundo nivel (app_shell -> attach) no
+    // basta. Mismo patrón que local_server_mod/events_mod — módulo propio, sin dependencias
+    // más allá de std (attach.zig importa LocalServer.zig, que tampoco depende de nada más).
+    const attach_mod = b.createModule(.{
+        .root_source_file = b.path("src/herdr/attach.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const attach_tests = b.addTest(.{ .root_module = attach_mod });
+    test_step.dependOn(&b.addRunArtifact(attach_tests).step);
 }
