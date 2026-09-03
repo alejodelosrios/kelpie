@@ -236,7 +236,7 @@ por el worktree, este comando es el que de verdad limpia, y si ya se borró, fal
 > usuario. Usa `pgrep -x <nombre-exacto>`. **El servidor `herdr` no se mata jamás** — el dueño tiene
 > otras sesiones de otros proyectos colgando de él.
 
-### Verificación de cierre — las CINCO, no dos
+### Verificación de cierre — las SEIS, no dos
 
 ```sh
 git worktree list                              # solo el repo principal
@@ -247,7 +247,7 @@ gh issue list --state open                     # ningún issue de trabajo ya mer
 herdr pane list | awk '/probe|gate|test|fix[0-9]/'   # ningún títere que inyectaste tú
 ```
 
-**La quinta es la que se añadió tras #84**, y es la única que mira fuera del repo. Las otras cuatro
+**La sexta es la que se añadió tras #84**, y es la única que mira fuera del repo. Las otras cinco
 salieron verdes con un agente fantasma en `blocked` vivo en la sesión del dueño.
 
 **`git branch -r` es la que se olvidaba**, y es justo donde se acumula la basura invisible: las
