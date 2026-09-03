@@ -11,6 +11,7 @@ const gtk = @import("gtk");
 const gdk = @import("gdk");
 const adw = @import("adw");
 const ThemeWatcher = @import("../omarchy/ThemeWatcher.zig");
+const Notify = @import("../omarchy/Notify.zig");
 const Store = @import("../model/Store.zig").Store;
 const types = @import("../herdr/types.zig");
 const LocalServer = @import("../herdr/LocalServer.zig");
@@ -150,6 +151,15 @@ var theme_provider: ?*gtk.CssProvider = null;
 var theme_watcher: ThemeWatcher = .{};
 var theme_watcher_started: bool = false;
 
+// Notify (#18): fires Omarchy toasts on agent status transitions.
+// Started once from ensureSidebarInited, same single-thread/no-sync pattern.
+var notify: Notify = .{};
+var notify_inited: bool = false;
+
+// Stored from onActivate so isWindowActive (Notify callback) can check
+// whether the window has focus without creating a new Application instance.
+var gtk_app_ref: ?*gtk.Application = null;
+
 /// Picks the empty-state label text by locale prefix (see design #13 §"No entra" —
 /// no translation framework, just a `LANG`/`LC_ALL` prefix check).
 /// Used only at startup (before the herdr link publishes the real status).
@@ -205,6 +215,7 @@ fn onActivate(app: *adw.Application, _: ?*anyopaque) callconv(.c) void {
     // Uses GTK's own accounting (getActiveWindow) instead of a global that could
     // become a dangling pointer if the window is destroyed between signals.
     const gtk_app = gobject.ext.as(gtk.Application, app);
+    gtk_app_ref = gtk_app;
     if (gtk.Application.getActiveWindow(gtk_app)) |w| {
         gtk.Window.present(w);
         return;
@@ -353,7 +364,10 @@ fn onCommandLine(app: *adw.Application, cmdline: *gio.ApplicationCommandLine, _:
 fn focusAgent(device: []const u8, pane: []const u8) bool {
     ensureStoreInited();
     const found = store.agents.contains(.{ .device_id = device, .pane_id = pane });
-    if (found and sidebar_inited) _ = sidebar.selectByKey(device, pane);
+    if (found) {
+        if (sidebar_inited) _ = sidebar.selectByKey(device, pane);
+        if (notify_inited) notify.dismiss(device, pane);
+    }
     return found;
 }
 
@@ -417,6 +431,15 @@ fn ensureSidebarInited() void {
         std.log.err("sidebar: addObserver failed: {t}", .{err});
     };
 
+    // Notify (#18): register as a ChangeObserver alongside the sidebar.
+    if (!notify_inited) {
+        notify_inited = true;
+        notify = Notify.init(gpa, io, &isWindowActive, null);
+        store.addObserver(notify.observer()) catch |err| {
+            std.log.err("notify: addObserver failed: {t}", .{err});
+        };
+    }
+
     seedDemoSidebarOnce();
 }
 
@@ -426,6 +449,16 @@ fn ensureSidebarInited() void {
 /// false stub.
 fn onSidebarActivated(_: ?*anyopaque, device: []const u8, pane: []const u8) void {
     std.log.info("sidebar: focus {s}/{s} (attach pending #19)", .{ device, pane });
+    notify.dismiss(device, pane);
+}
+
+/// Callback for Notify (#18): returns true if kelpie's window is active
+/// (has focus). Used to suppress "done" notifications for the agent the
+/// user is already looking at.
+fn isWindowActive(_: ?*anyopaque) bool {
+    const gtk_app = gtk_app_ref orelse return false;
+    const w = gtk.Application.getActiveWindow(gtk_app) orelse return false;
+    return gtk.Window.isActive(w) != 0;
 }
 
 /// Re-applies the theme CSS. Callable from both `onActivate` (startup) and
@@ -653,6 +686,7 @@ fn toggleSidebar(_: *gtk.Widget, _: ?*glib.Variant, user_data: ?*anyopaque) call
 // way main.zig's `test { _ = app_shell; }` already runs this file's tests.
 test {
     _ = ThemeWatcher;
+    _ = Notify;
     _ = herdr_link;
 }
 

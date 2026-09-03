@@ -415,3 +415,36 @@ Formato: `- [YYYY-MM-DD] #issue — qué se vio · por qué no se arregló ahora
   el snapshot en `done` (verificado tres veces el 2026-09-02) · no es un bug de kelpie, pero invalida
   cualquier guion de prueba que asuma poder volver de `done` a `idle` · el gate de #84 tuvo que
   excluir `done` de su secuencia por esto.
+
+- **`buildArgv` (`omarchy/Notify.zig:308-379`, #18) no tiene ni un `errdefer`**: 15 `dupe`/`allocPrint`
+  falibles (`body`, `exec_target`, el array `argv` y sus 12-14 elementos) sin ninguno armado · si
+  cualquiera falla por OOM se fugan los anteriores · quinta reincidencia de la familia
+  `#5`/`#8`/`#12`/`#16` del ledger tras la regla que #84 escribió («cada `dupe` lleva su `errdefer`
+  armado antes del siguiente») · fix acotado y ya escrito por la auditoría de #18: `errdefer` tras
+  `body`/`exec_target`, y tras `gpa.alloc(argv, count)` uno que libere `argv[0..i]` + el propio array ·
+  no bloquea #18 (solo OOM), pero se arrastra si #18 se retoma.
+
+- **El diseño de #18 se equivoca sobre qué hilo bloquea `std.process.run`**
+  (`roadmap/designs/18-notificaciones-omarchy.md:95-98`): dice que el bloqueo «no es el hilo de
+  render/PTY que ADR-0001 protege», pero `onEvent`→`applyEvent`→`onStoreTransition` sí corre en el
+  main context de GLib (`ui/herdr_link.zig:39-50`, `idleAddOnce`) — es el hilo de UI. El `.timeout` de
+  3s sí acota el bloqueo (verificado: `process.zig:510` arma `defer child.kill(io)`), así que el
+  riesgo es real pero medido, no el argumento que el diseño da para aceptarlo. Corregir la frase del
+  contrato si #18 se retoma, no el código.
+
+- **`omarchy-notification-dismiss` retira por substring sobre TODAS las notificaciones del sistema**,
+  no solo las de kelpie (`omarchy-shell -q notifications dismiss "$1"`, verificado en la máquina) ·
+  Omarchy no expone dismiss por id numérico · el `entry.id` que #18 guarda por agente solo sirve para
+  `-r`, nunca para un dismiss exacto · limitación del contrato de Omarchy, no del diff · un headline
+  corto de kelpie podría retirar la toast de otra app por coincidencia de substring.
+
+- **`onTransition` sigue siendo código muerto en producción** (reconfirma la fila de arriba sobre el
+  mismo tema, ahora verificado punta a punta para #18): `fireTransition` tiene un único call site en
+  todo `Store.zig` (`:344`, dentro de `pane_agent_status_changed`), ese evento no está en
+  `Events.zig:subscription_types` (`:72-81`) y aunque lo estuviera herdr 0.8.2 no lo emite (medido en
+  #84: 55s sobre agentes reales, 0 eventos). `applySnapshot` —el único camino que sí corre en
+  producción vía el sondeo de 150ms— solo llama `fireChanged`, nunca `fireTransition`. Cualquier
+  feature futuro que se cuelgue de `onTransition` (como intentó #18) necesita primero que
+  `applySnapshot` derive transiciones comparando status viejo/nuevo por agente — trabajo de
+  `core-builder` en `model/Store.zig`, no del consumidor. #18 quedó bloqueado y escalado al humano por
+  esto el 2026-09-03.
