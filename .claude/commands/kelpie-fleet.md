@@ -211,7 +211,32 @@ gh issue close <N>
 El `push --delete` va explícito aunque hayas usado `gh pr merge --delete-branch`: si ese flag falló
 por el worktree, este comando es el que de verdad limpia, y si ya se borró, falla sin daño.
 
-### Verificación de cierre — las cuatro, no dos
+> ### 🧹 El estado que inyectaste FUERA del repo también se limpia
+>
+> Si para probar algo cambiaste el estado de un agente de herdr —`herdr pane report-agent`, un pane
+> sintético de títere, cualquier cosa que altere lo que el usuario ve— **eso se revierte al terminar,
+> y la limpieza se verifica leyendo el estado de vuelta**, nunca por el exit code.
+>
+> Pasó en el gate de #84: se creó el títere `wA:p9` con `agent=probe` y se dejó en `blocked` para la
+> confirmación visual. El `release-agent` de la limpieza **omitía el flag obligatorio `--agent` y
+> devolvió `exit 0` sin hacer nada ni imprimir nada**. El cierre se dio por bueno tras verificar
+> worktrees, ramas, PRs e issues — pero nadie verificó el estado inyectado fuera del repo. Lo
+> encontró el dueño horas después.
+>
+> **No es cosmético**: un agente fantasma en `blocked` es exactamente lo que kelpie pone primero en
+> la lista y con glifo de alerta. Le estaba gritando al usuario por algo que no existía.
+>
+> ```sh
+> herdr pane release-agent <pane> --source <id> --agent <label>   # AMBOS flags, o falla en silencio
+> herdr pane list | awk '/probe|gate|test/'                       # y se comprueba leyendo de vuelta
+> ```
+>
+> Libéralo en un `trap` del propio guion, no en un paso final que puede no ejecutarse si algo se
+> interrumpe. Y **nunca `pkill -f <patrón>`**: mata tu propio shell y puede alcanzar procesos del
+> usuario. Usa `pgrep -x <nombre-exacto>`. **El servidor `herdr` no se mata jamás** — el dueño tiene
+> otras sesiones de otros proyectos colgando de él.
+
+### Verificación de cierre — las CINCO, no dos
 
 ```sh
 git worktree list                              # solo el repo principal
@@ -219,7 +244,11 @@ git branch                                     # solo develop y main
 git branch -r                                  # solo origin/develop, origin/main (y origin/HEAD)
 gh pr list --state open                        # vacío, o solo lo que dejaste abierto a propósito
 gh issue list --state open                     # ningún issue de trabajo ya mergeado
+herdr pane list | awk '/probe|gate|test|fix[0-9]/'   # ningún títere que inyectaste tú
 ```
+
+**La quinta es la que se añadió tras #84**, y es la única que mira fuera del repo. Las otras cuatro
+salieron verdes con un agente fantasma en `blocked` vivo en la sesión del dueño.
 
 **`git branch -r` es la que se olvidaba**, y es justo donde se acumula la basura invisible: las
 ramas huérfanas no aparecen en `git worktree list` ni en `git branch`, y el siguiente fleet las

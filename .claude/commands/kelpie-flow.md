@@ -292,6 +292,31 @@ Pásale también `lessons-learned.md`: una de sus tareas es **cruzar el diff con
 
 `main` no se toca desde aquí: solo recibe de `develop` en release, a mano, fuera del enjambre.
 
+> ### 🧹 El estado que inyectaste FUERA del repo también se limpia
+>
+> Si para probar algo cambiaste el estado de un agente de herdr —`herdr pane report-agent`, un pane
+> sintético de títere, cualquier cosa que altere lo que el usuario ve— **eso se revierte al terminar,
+> y la limpieza se verifica leyendo el estado de vuelta**, nunca por el exit code.
+>
+> Pasó en el gate de #84: se creó el títere `wA:p9` con `agent=probe` y se dejó en `blocked` para la
+> confirmación visual. El `release-agent` de la limpieza **omitía el flag obligatorio `--agent` y
+> devolvió `exit 0` sin hacer nada ni imprimir nada**. El cierre se dio por bueno tras verificar
+> worktrees, ramas, PRs e issues — pero nadie verificó el estado inyectado fuera del repo. Lo
+> encontró el dueño horas después.
+>
+> **No es cosmético**: un agente fantasma en `blocked` es exactamente lo que kelpie pone primero en
+> la lista y con glifo de alerta. Le estaba gritando al usuario por algo que no existía.
+>
+> ```sh
+> herdr pane release-agent <pane> --source <id> --agent <label>   # AMBOS flags, o falla en silencio
+> herdr pane list | awk '/probe|gate|test/'                       # y se comprueba leyendo de vuelta
+> ```
+>
+> Libéralo en un `trap` del propio guion, no en un paso final que puede no ejecutarse si algo se
+> interrumpe. Y **nunca `pkill -f <patrón>`**: mata tu propio shell y puede alcanzar procesos del
+> usuario. Usa `pgrep -x <nombre-exacto>`. **El servidor `herdr` no se mata jamás** — el dueño tiene
+> otras sesiones de otros proyectos colgando de él.
+
 ## Reglas permanentes
 
 - Nunca menos verificación por prisa. El gate mecánico es barato; sáltatelo y pagas en el auditor.
