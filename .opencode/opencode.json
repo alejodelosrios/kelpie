@@ -1,3 +1,13 @@
 {
-  "$schema": "https://opencode.ai/config.json"
+  "$schema": "https://opencode.ai/config.json",
+  "permission": {
+    "external_directory": {
+      "/tmp/*": "allow",
+      "/home/alejodelosrios/Documents/Sites/kelpie/*": "allow",
+      "/home/alejodelosrios/Documents/Sites/kelpie-*": "allow",
+      "/usr/share/omarchy/*": "allow",
+      "/usr/lib/zig/*": "allow",
+      "*": "ask"
+    }
+  }
 }
