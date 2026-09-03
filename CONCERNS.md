@@ -457,3 +457,15 @@ Formato: `- [YYYY-MM-DD] #issue — qué se vio · por qué no se arregló ahora
   OpenCode del repo y dejó los builders en Claude Code + MiMo · detectado por el orquestador de la ola
   #18+#19, no tocado por estar fuera de su alcance · lo dispara cualquier fleet futuro que lea el
   roadmap y monte agentes sobre un motor que ya no está.
+
+- **El flaky de `LocalServer.ensureRunning` (errno 111) está ahora medido, no supuesto** · el auditor
+  de #93 lo reprodujo **2 de 4 ejecuciones con el árbol byte-idéntico**, y QA lo vio una vez más ·
+  lleva desde #19 en este archivo sin dueño · es un test dependiente de reloj y **va a teñir un CI de
+  rojo al azar**, que es exactamente lo que rompe la regla de «nada se mergea en rojo»: merece issue
+  dedicado antes de que muerda.
+
+- **Las rutas de `permission.external_directory` son absolutas y específicas de esta máquina**, en
+  archivos versionados (`.opencode/opencode.json` y el frontmatter de los 8 agentes) · no había forma
+  de expresarlas relativas y el enjambre no arranca sin ellas · lo dispara cualquier clon del repo en
+  otra máquina o con el checkout en otra ruta: los agentes cargarán pero se bloquearán en el primer
+  acceso.

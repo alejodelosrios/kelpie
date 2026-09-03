@@ -98,6 +98,11 @@ ejecutando, y aplica la mitigación que corresponda:
 - otra cosa → **repórtaselo al orquestador**, es un modo de fallo nuevo y merece entrada en el
   ledger.
 
+**Y antes de bloquearte en un `--wait` largo —el auditor del canal 5, sobre todo— anúncialo por tu
+canal**: `FASE: esperando al auditor en <pane>, --wait hasta N ms`. Mientras esperas, tus tres
+señales son idénticas a las de un colgado, y quien te vigila te va a interrumpir. Pasó en #91: el
+veredicto del auditor quedó sin leer porque nadie sabía que la espera era legítima.
+
 **Nunca esperes en silencio a un subagente.** Si llevas más de 5 minutos sin novedad, dilo por tu
 canal aunque no tengas nada que reportar: un PM callado y un PM colgado se ven igual desde fuera.
 

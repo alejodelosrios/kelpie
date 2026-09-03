@@ -147,6 +147,34 @@ El mensaje final es el **único** artefacto que sobrevive. Lleva siempre:
 El PM **verifica cada fila ejecutando `sed -n '<línea>p' <archivo>`**. Una cita falsa rechaza el diff
 aunque compile. Esto es `sed`, no magia del modelo: va escrito para que ningún PM se lo salte.
 
+### Canal 5b — una espera se ANUNCIA antes de bloquearse
+
+**`herdr agent prompt … --wait` bloquea al PM**, y mientras dura, sus tres señales de vida
+(§Canal 3b) quedan **exactamente iguales que las de un PM colgado**: coste plano, contexto plano,
+`mtime` plano, y la CPU alta del event loop de la TUI bloqueada. Una auditoría de Opus tarda varios
+minutos, así que el falso positivo está garantizado.
+
+Pasó en #91: el orquestador dio por colgado a un PM que esperaba legítimamente y le interrumpió el
+`--wait`. **El auditor terminó y su veredicto se quedó sin leer en su pane**, con el PM ya
+desconectado de la espera.
+
+Por eso, **antes** de cualquier `--wait` largo, el que espera lo dice por su canal:
+
+```
+FASE: esperando al auditor en <pane-id>, --wait hasta <N> ms. Sin senal de vida hasta que vuelva.
+```
+
+Con eso, quien vigila **excluye ese tramo** en vez de interrumpirlo, y si algo va mal sabe a qué
+pane ir a mirar. Es la regla de oro aplicada a las esperas: *nada se transmite solo de voz* — una
+espera silenciosa es información perdida.
+
+Y el corolario para quien vigila: **antes de interrumpir a nadie, comprueba si tiene un pane hijo
+vivo** (`herdr pane list`). Un hijo trabajando explica el silencio del padre.
+
+**Si aun así se interrumpe una espera, el trabajo NO se pierde**: el veredicto sigue escrito en el
+pane del hijo. Se recupera con `herdr agent read <pane-hijo>` y se le pide al PM que lo lea él —
+nunca se lo pegas tú, o le robas la verificación.
+
 ### Canal 5 — PM OpenCode ↔ auditor Claude
 
 Existe porque **el auditor no se abarata** y en esta máquina OpenCode no tiene ningún provider de
