@@ -446,3 +446,14 @@ Formato: `- [YYYY-MM-DD] #issue — qué se vio · por qué no se arregló ahora
   fallaron ahí, 0 relacionadas con el diff de #19 · sigue sin arreglarse (mismo alcance ya declarado
   fuera de #81/#84), pero cada issue que lo vuelve a pisar es una ronda de verificación perdida
   reconfirmando lo mismo.
+
+- **`scripts/kelpie-builder` hace `cd "$REPO_ROOT"` antes de leer `< "$PROMPT_FILE"`, así que un
+  prompt con ruta relativa revienta con `No such file or directory`** · reproducido desde fuera de un
+  worktree en la ola #18+#19; funciona por casualidad desde los worktrees porque ahí `REPO_ROOT` es el
+  propio worktree · lo dispara cualquier invocación del builder con cwd distinto a la raíz del repo, y
+  el error se parece a «el prompt no existe» en vez de a «el script cambió de directorio».
+
+- **El issue #91 («Agentes OpenCode del enjambre») contradice a `CLAUDE.md` tras #87**, que sacó
+  OpenCode del repo y dejó los builders en Claude Code + MiMo · detectado por el orquestador de la ola
+  #18+#19, no tocado por estar fuera de su alcance · lo dispara cualquier fleet futuro que lea el
+  roadmap y monte agentes sobre un motor que ya no está.
