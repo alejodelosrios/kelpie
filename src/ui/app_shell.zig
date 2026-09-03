@@ -16,6 +16,7 @@ const types = @import("../herdr/types.zig");
 const LocalServer = @import("../herdr/LocalServer.zig");
 const herdr_link = @import("herdr_link.zig");
 const Sidebar = @import("sidebar.zig").Sidebar;
+const attach = @import("../herdr/attach.zig");
 
 const app_id = "io.github.alejodelosrios.kelpie";
 
@@ -425,7 +426,30 @@ fn ensureSidebarInited() void {
 /// design #16 §"No entra") — logging is the honest truth of today, not a
 /// false stub.
 fn onSidebarActivated(_: ?*anyopaque, device: []const u8, pane: []const u8) void {
-    std.log.info("sidebar: focus {s}/{s} (attach pending #19)", .{ device, pane });
+    _ = device; // not used this round — TARGET is just the pane
+
+    // `pane` is a borrowed slice from Sidebar.rows; a concurrent refresh()
+    // can free it while the attach thread is still running.  Duplicate it
+    // so the thread owns its copy.
+    const pane_owned = gpa.dupe(u8, pane) catch |err| {
+        std.log.err("attach: dupe pane failed: {t}", .{err});
+        return;
+    };
+
+    // Compat check + spawn in a detached thread — never block the GTK main loop.
+    const thread = std.Thread.spawn(.{}, attachThreadFn, .{pane_owned}) catch |err| {
+        std.log.err("attach: failed to spawn thread: {t}", .{err});
+        gpa.free(pane_owned);
+        return;
+    };
+    thread.detach();
+}
+
+/// Runs in a detached thread: checks protocol compat and spawns the attach
+/// process.  Owns `pane` and frees it on exit.
+fn attachThreadFn(pane: []const u8) void {
+    defer gpa.free(pane);
+    attach.attachOrLogMismatch(io, gpa, environ_map.*, pane);
 }
 
 /// Re-applies the theme CSS. Callable from both `onActivate` (startup) and
