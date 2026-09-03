@@ -415,3 +415,14 @@ Formato: `- [YYYY-MM-DD] #issue — qué se vio · por qué no se arregló ahora
   el snapshot en `done` (verificado tres veces el 2026-09-02) · no es un bug de kelpie, pero invalida
   cualquier guion de prueba que asuma poder volver de `done` a `idle` · el gate de #84 tuvo que
   excluir `done` de su secuencia por esto.
+
+- **`attach.attachOrLogMismatch` no acepta un `StatusReader` inyectable** (`herdr/attach.zig:75`) ·
+  llama directamente a `LocalServer.readHerdrStatus`, así que el escenario Gherkin de #19 "protocol
+  mismatch no abre una ventana" **no tiene cobertura automática** — solo se verifica con un `herdr`
+  real reportando `compatible: false`, o a mano · `LocalServer.ensureRunning` ya resuelve el mismo
+  problema con `pub const StatusReader = *const fn(...) ?ServerCompat` como parámetro inyectado
+  (`herdr/LocalServer.zig:63`, tests en líneas 442-501) · **la mitigación evidente, no implementada
+  aquí**: darle a `attachOrLogMismatch` la misma forma,
+  `attachOrLogMismatch(io, gpa, environ, pane, status_reader: LocalServer.StatusReader)`, con
+  `readHerdrStatus` como valor por defecto en el call site de producción (`ui/app_shell.zig`) ·
+  detectado por QA en #19, no arreglado por decisión de alcance (el diseño de #19 no lo pedía).
