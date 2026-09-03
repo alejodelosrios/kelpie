@@ -1,9 +1,12 @@
 # Diseño — #93 `Store.applySnapshot` deriva transiciones (`onTransition` deja de ser código muerto)
 
-> Aprobado por: PM OpenCode (fleet `wA:p5`, `gates=scope,diseño`) · 2026-09-03 · rama `fix/93-applysnapshot-transiciones`
+> Aprobado por: orquestador `wA:p5` · 2026-09-03 · rama `fix/93-applysnapshot-transiciones`
+> (nota de procedencia: el PM lo pre-firmó en 729d268 sin autoridad para ello; el orquestador
+> aprobó el gate de diseño después, contra el issue y contra Store.zig, y ordenó que en adelante el
+> PM publique el diseño como pendiente y se detenga hasta su mensaje)
 >
-> El gate humano de este issue es el **merge**. Scope y diseño los aprueba el PM porque el issue
-> viene enriquecido (contrato ya aceptado); solo se escala por contradicción issue/código.
+> El gate humano de este issue es el **merge**. Scope y diseño los aprueba el orquestador del fleet
+> (`gates=scope,diseño`); solo se escala por contradicción issue/código.
 
 ## Spec
 
