@@ -198,6 +198,25 @@ pub const Store = struct {
             }
         }
 
+        // Capture previous agent_status by pane_id BEFORE mutation.
+        // Only pane_id (dupe) + status (value) — no Agent literals.
+        var prev_status = std.hash_map.StringHashMap(types.AgentStatus).init(self.gpa);
+        errdefer {
+            var kit = prev_status.keyIterator();
+            while (kit.next()) |key| {
+                self.gpa.free(key.*);
+            }
+            prev_status.deinit();
+        }
+        {
+            var it = self.agents.iterator();
+            while (it.next()) |entry| {
+                const duped_id = try self.gpa.dupe(u8, entry.value_ptr.pane_id);
+                errdefer self.gpa.free(duped_id);
+                try prev_status.put(duped_id, entry.value_ptr.status);
+            }
+        }
+
         // Null out before any destructive mutation so a midway failure
         // doesn't leave a stale fingerprint that blocks the next snapshot.
         self.last_fingerprint = null;
@@ -282,6 +301,28 @@ pub const Store = struct {
 
         std.log.debug("applySnapshot: aplicado (agents={d}, fingerprint=0x{x})", .{ snapshot.agents.len, fp });
         fireChanged(&self.observers);
+
+        // Fire transitions for existing agents whose status changed.
+        // New agents (not in prev_status) and disappeared agents are skipped.
+        for (snapshot.agents) |info| {
+            if (prev_status.get(info.pane_id)) |prev| {
+                if (prev != info.agent_status) {
+                    const key = AgentKey{ .device_id = "local", .pane_id = info.pane_id };
+                    if (self.agents.getPtr(key)) |agent_ptr| {
+                        fireTransition(&self.observers, agent_ptr, prev, info.agent_status);
+                    }
+                }
+            }
+        }
+
+        // Free duped pane_ids in prev_status
+        {
+            var it = prev_status.keyIterator();
+            while (it.next()) |key| {
+                self.gpa.free(key.*);
+            }
+        }
+        prev_status.deinit();
     }
 
     // -----------------------------------------------------------------------
@@ -1797,4 +1838,110 @@ test "applySnapshot: un fallo a mitad no bloquea el siguiente snapshot" {
     try testing.expectEqual(@as(usize, 2), store.agents.count());
     const key = AgentKey{ .device_id = "local", .pane_id = "p1" };
     try testing.expect(store.agents.get(key) != null);
+}
+
+test "applySnapshot: un cambio de agent_status dispara onTransition con from/to" {
+    var store = Store.init(testing.allocator);
+    defer store.deinit();
+
+    var obs = TestObserver{};
+    try store.addObserver(obs.observer());
+
+    // Initial snapshot: p1 in working
+    const agents1 = [_]types.AgentInfo{makeAgentInfo("p1", .working, 1)};
+    try store.applySnapshot(makeSnapshot(&agents1, &.{}, &.{}));
+    try testing.expectEqual(@as(u32, 1), obs.changed_count);
+    try testing.expectEqual(@as(u32, 0), obs.transition_count);
+
+    // Second snapshot: p1 in blocked (status changed)
+    const agents2 = [_]types.AgentInfo{makeAgentInfo("p1", .blocked, 2)};
+    try store.applySnapshot(makeSnapshot(&agents2, &.{}, &.{}));
+
+    // onChanged fires again
+    try testing.expectEqual(@as(u32, 2), obs.changed_count);
+    // onTransition fires exactly once with from=working to=blocked
+    try testing.expectEqual(@as(u32, 1), obs.transition_count);
+    try testing.expectEqual(types.AgentStatus.working, obs.last_transition_from);
+    try testing.expectEqual(types.AgentStatus.blocked, obs.last_transition_to);
+}
+
+test "applySnapshot: un agente nuevo dispara onChanged pero no onTransition" {
+    var store = Store.init(testing.allocator);
+    defer store.deinit();
+
+    var obs = TestObserver{};
+    try store.addObserver(obs.observer());
+
+    // Initial snapshot: only p1
+    const agents1 = [_]types.AgentInfo{makeAgentInfo("p1", .working, 1)};
+    try store.applySnapshot(makeSnapshot(&agents1, &.{}, &.{}));
+    try testing.expectEqual(@as(u32, 1), obs.changed_count);
+    try testing.expectEqual(@as(u32, 0), obs.transition_count);
+
+    // Second snapshot: p1 + p2 (p2 is new)
+    const agents2 = [_]types.AgentInfo{
+        makeAgentInfo("p1", .working, 1),
+        makeAgentInfo("p2", .idle, 2),
+    };
+    try store.applySnapshot(makeSnapshot(&agents2, &.{}, &.{}));
+
+    // onChanged fires
+    try testing.expectEqual(@as(u32, 2), obs.changed_count);
+    // onTransition does NOT fire (p2 is new, not a transition)
+    try testing.expectEqual(@as(u32, 0), obs.transition_count);
+}
+
+test "applySnapshot: sin cambios de estado no dispara onTransition ni rompe el corto-circuito" {
+    var store = Store.init(testing.allocator);
+    defer store.deinit();
+
+    var obs = TestObserver{};
+    try store.addObserver(obs.observer());
+
+    // Initial snapshot
+    const agents1 = [_]types.AgentInfo{makeAgentInfo("p1", .working, 1)};
+    try store.applySnapshot(makeSnapshot(&agents1, &.{}, &.{}));
+    try testing.expectEqual(@as(u32, 1), obs.changed_count);
+
+    // Second snapshot: same status, different revision (fingerprint changes because revision is not in fingerprint)
+    // Actually, revision IS in fingerprint via state_change_seq? Let me check...
+    // computeFingerprint does NOT include revision, only pane_id, agent_status, workspace_id, tab_id, focused, state_change_seq, agent, display_agent, title, terminal_title_stripped, cwd.
+    // So same pane_id + same status = same fingerprint → guard fires, no mutation.
+    const agents2 = [_]types.AgentInfo{makeAgentInfo("p1", .working, 99)};
+    try store.applySnapshot(makeSnapshot(&agents2, &.{}, &.{}));
+
+    // onChanged does NOT fire (guard by fingerprint)
+    try testing.expectEqual(@as(u32, 1), obs.changed_count);
+    // onTransition does NOT fire
+    try testing.expectEqual(@as(u32, 0), obs.transition_count);
+}
+
+test "applySnapshot: un agente que desaparece no dispara onTransition" {
+    var store = Store.init(testing.allocator);
+    defer store.deinit();
+
+    var obs = TestObserver{};
+    try store.addObserver(obs.observer());
+
+    // Initial snapshot: p1 and p2
+    const agents1 = [_]types.AgentInfo{
+        makeAgentInfo("p1", .working, 1),
+        makeAgentInfo("p2", .idle, 2),
+    };
+    try store.applySnapshot(makeSnapshot(&agents1, &.{}, &.{}));
+    try testing.expectEqual(@as(u32, 1), obs.changed_count);
+    try testing.expectEqual(@as(u32, 0), obs.transition_count);
+
+    // Second snapshot: only p1 (p2 disappears)
+    const agents2 = [_]types.AgentInfo{makeAgentInfo("p1", .working, 1)};
+    try store.applySnapshot(makeSnapshot(&agents2, &.{}, &.{}));
+
+    // onChanged fires (snapshot changed)
+    try testing.expectEqual(@as(u32, 2), obs.changed_count);
+    // onTransition does NOT fire (p2 disappeared, not a transition)
+    try testing.expectEqual(@as(u32, 0), obs.transition_count);
+
+    // Store no longer contains p2
+    const key_p2 = AgentKey{ .device_id = "local", .pane_id = "p2" };
+    try testing.expect(store.agents.get(key_p2) == null);
 }
