@@ -9,6 +9,11 @@ permission:
   list: allow
   edit: allow
   bash: deny
+  external_directory:
+    "/tmp/*": allow
+    "/home/alejodelosrios/Documents/Sites/kelpie*": allow
+    "/usr/share/omarchy/*": allow
+    "/usr/lib/zig/*": allow
 ---
 
 > **Protocolo de comunicación**: `.opencode/protocol.md` — léelo antes de tu primer reporte.
