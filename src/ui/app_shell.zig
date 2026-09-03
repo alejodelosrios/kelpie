@@ -422,9 +422,8 @@ fn ensureSidebarInited() void {
 }
 
 /// Row activation from a click (`gtk.ListView`'s single-click-activate,
-/// criterio 6). The real "switch herdr to this pane" action is #19 (attach,
-/// design #16 §"No entra") — logging is the honest truth of today, not a
-/// false stub.
+/// criterio 6). Spawns the external attach (#19, design #19) on a detached
+/// thread — never blocks the GTK main loop.
 fn onSidebarActivated(_: ?*anyopaque, device: []const u8, pane: []const u8) void {
     _ = device; // not used this round — TARGET is just the pane
 
