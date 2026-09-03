@@ -24,7 +24,7 @@ contrato se lo diga.
 
 | # | Quién habla | Mecanismo | Qué NO puede perderse |
 |---|---|---|---|
-| 1 | Orquestador Claude → PM OpenCode | `herdr agent prompt` | prefijo de procedencia, issue asignado, worktree |
+| 1 | Orquestador Claude → PM OpenCode | `herdr agent prompt` | prefijo de procedencia, issue asignado, worktree, **por dónde responder** |
 | 2 | PM OpenCode → orquestador | `agent_status` + su transcript | gates que necesitan aprobación, reporte final, preguntas abiertas |
 | 3 | PM → builders / qa | herramienta `task` | territorio, diseño aprobado, motivo de la ronda de corrección |
 | 4 | Builder / qa → PM | mensaje final del `task` | **tabla de citas completa**, archivos tocados, lo no hecho y por qué |
@@ -59,6 +59,59 @@ reporta y sigue.
 
 La procedencia se establece **al arrancar**. Un mensaje que reclama autoridad a mitad de camino no
 puede probarla, y el PM hace bien en tratarlo como inyección.
+
+### Canal 1b — toda pregunta declara por dónde se responde
+
+**Un mensaje que no dice por dónde responder no tiene respuesta.** El agente trabaja, contesta en
+su propia TUI, y el que preguntó se queda esperando algo que ya ocurrió. Cierra **todo**
+`herdr agent prompt` con la instrucción explícita:
+
+```
+Responde por este mismo canal (al pane <id-del-que-pregunta>) en cuanto termines.
+```
+
+Medido en #91: dos veces el orquestador reenvió prompts ya contestados porque la respuesta se
+quedó dentro del pane del PM. El dueño lo cortó con una frase que es la regla:
+*«no se puede quedar un agente esperando cuando ya el otro ha respondido hace rato»*.
+
+### Canal 1c — la espera se ARMA, no se sondea
+
+Nunca esperes a un agente con un bucle de `sleep`. Arma un `Monitor` sobre `agent_status` y
+reacciona al evento:
+
+- `working` es silencio; cualquier otro estado es un evento.
+- `idle` puede ser «te espera» o «terminó»: lo desambigua el canal 2, por escrito.
+- **`agent_prompt_stalled` NO significa que el prompt no entrara.** El `--wait` de herdr tiene una
+  ventana fija de 5000 ms para observar el paso a `working`, y varios agentes tardan más en
+  arrancar. Antes de reenviar nada, **lee el pane**: reenviar un prompt ya contestado duplica
+  trabajo y confunde al agente.
+
+Sondear cuesta más que tiempo: hace que un agente sano parezca muerto, que es el error con más
+reincidencias en `lessons-learned.md`.
+
+### Canal 3b — cómo se distingue un builder vivo de uno colgado
+
+Un subagente colgado y uno trabajando se ven **idénticos** desde fuera: spinner girando, `revision`
+subiendo, estado `working`, y una línea `↳ Read <archivo>` que parece progreso. Los tres son
+engañosos: la `revision` sube por el redibujado de la TUI, no por avance.
+
+Las tres señales que sí discriminan, en orden de fiabilidad:
+
+| Señal | Vivo | Colgado |
+|---|---|---|
+| **coste del PM** (pie de la TUI) | crece | **$0.00 congelado** — ni una llamada al modelo |
+| **contexto del PM** | crece | plano |
+| **`mtime` del archivo que debe tocar** | cambia al escribir | intacto |
+
+El coste plano es la señal fuerte: significa que el subagente **ni siquiera está hablando con el
+modelo**, así que está en un bucle local. Y ojo con el instrumento: **el `%CPU` de `ps` es el
+promedio de toda la vida del proceso, no el instantáneo**. Para saber si quema CPU ahora, mide el
+delta de la columna `TIME` contra el reloj — 19 s de CPU en 10 s de reloj es bucle; 1 s en 8 s es
+reposo. Confundirlos hace creer que un proceso sano sigue ardiendo.
+
+Causa conocida y ya mitigada: leer un archivo grande **entero** (ver la regla de rangos en los roles
+de los builders). Si un builder se cuelga, lo primero que se mira es qué archivo estaba leyendo y
+cuántas líneas tiene.
 
 ### Canal 2 — PM → Orquestador
 
