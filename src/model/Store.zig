@@ -1903,10 +1903,9 @@ test "applySnapshot: sin cambios de estado no dispara onTransition ni rompe el c
     try store.applySnapshot(makeSnapshot(&agents1, &.{}, &.{}));
     try testing.expectEqual(@as(u32, 1), obs.changed_count);
 
-    // Second snapshot: same status, different revision (fingerprint changes because revision is not in fingerprint)
-    // Actually, revision IS in fingerprint via state_change_seq? Let me check...
-    // computeFingerprint does NOT include revision, only pane_id, agent_status, workspace_id, tab_id, focused, state_change_seq, agent, display_agent, title, terminal_title_stripped, cwd.
-    // So same pane_id + same status = same fingerprint → guard fires, no mutation.
+    // Second snapshot: same status, different revision. computeFingerprint
+    // hashes pane_id + agent_status (not revision), so the fingerprint is
+    // unchanged and the guard returns early: no mutation, no notifications.
     const agents2 = [_]types.AgentInfo{makeAgentInfo("p1", .working, 99)};
     try store.applySnapshot(makeSnapshot(&agents2, &.{}, &.{}));
 
