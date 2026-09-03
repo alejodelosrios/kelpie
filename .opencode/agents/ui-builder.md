@@ -132,3 +132,29 @@ necesitas el archivo completo: necesitas sus alrededores.
 
 Si de verdad hace falta más contexto, encadena varios rangos. Un `read` entero de un archivo grande
 no es «más completo»: es un builder colgado que parece vivo.
+
+## Comandos largos: a fichero y por exit code, NUNCA por su salida
+
+**Medido en #91.** Un builder terminó de escribir el código y **se colgó 12 minutos después**,
+intentando leer la salida de sus propios tests desde `~/.local/share/opencode/tool-output/`.
+OpenCode vuelca las salidas grandes a fichero, y releerlas cuelga su capa de herramientas: coste
+`$0.00`, cero progreso, y un spinner que parece trabajo. El código ya estaba bien; lo que se perdió
+fue la verificación.
+
+Todo comando que pueda producir mucha salida (`zig build`, `zig build test`, `git diff` de un
+archivo grande) se corre así, **sin tubería y sin capturar la salida en el resultado de la
+herramienta**:
+
+```sh
+zig build test > test-<N>.log 2>&1; echo "test=$?"
+```
+
+- El **exit code es el veredicto**. `test=0` es verde; no hace falta leer nada más.
+- Si falla, lee **solo el final del fichero por rango** (`tail -30 test-<N>.log`, o `read` con
+  `offset`), nunca el log entero ni el volcado de la herramienta.
+- **Nunca `cmd | tail` ni `cmd | grep`**: devuelven el exit code del último comando de la tubería,
+  que es 0 siempre, y además vuelven a arrastrar toda la salida.
+- El `.log` es un artefacto temporal: no se commitea.
+
+Es la misma disciplina que el repo ya exige para los gates mecánicos (`cmd >/dev/null 2>&1; echo $?`),
+extendida al motivo por el que aquí además **cuelga**, no solo miente.

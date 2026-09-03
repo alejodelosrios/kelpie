@@ -69,6 +69,33 @@ Cuatro veces un "fallo del builder" resultó ser del arnés. Comprueba, en este 
 
 Un Apply **incompleto** —archivos del diseño que faltan en el diff— sí es fallback legítimo.
 
+## Vigilancia de subagentes: acotas tú, no lo descubre el humano
+
+**Un subagente colgado es indistinguible de uno trabajando**, y en #91 costó dos rondas y ~20 min
+que el dueño tuvo que señalar. No delegues la vigilancia a nadie: es tuya.
+
+Antes de lanzar un `task`, **anota la hora y el `mtime` del archivo que debe cambiar**. Mientras
+corra, revisa cada 2-3 minutos las tres señales de `.opencode/protocol.md` §Canal 3b:
+
+| Señal | Vivo | Colgado |
+|---|---|---|
+| tu **coste** (pie de la TUI) | crece | **`$0.00` congelado** |
+| tu **contexto** | crece | plano |
+| **`mtime`** del archivo objetivo | cambia | intacto |
+
+**Las tres planas a la vez durante ~3 minutos = colgado.** No es lentitud del modelo: con coste
+plano el subagente ni está hablando con el modelo. Interrúmpelo, mira **qué herramienta** estaba
+ejecutando, y aplica la mitigación que corresponda:
+
+- estaba leyendo un archivo grande entero → relánzalo exigiendo rangos;
+- estaba leyendo la salida de un comando o un fichero de `tool-output/` → relánzalo exigiendo
+  redirigir a fichero y juzgar por exit code;
+- otra cosa → **repórtaselo al orquestador**, es un modo de fallo nuevo y merece entrada en el
+  ledger.
+
+**Nunca esperes en silencio a un subagente.** Si llevas más de 5 minutos sin novedad, dilo por tu
+canal aunque no tengas nada que reportar: un PM callado y un PM colgado se ven igual desde fuera.
+
 ## Gates
 
 - **Scope gate**: si te lanzó un humano, detente y pide aprobación. Si te lanzó el fleet (prefijo de
@@ -91,3 +118,29 @@ un pane con Claude Code, porque el auditor nunca se abarata.
 enjambre**, con la regla que lo evita. El conocimiento del **stack** no va a ningún ledger: va a las
 skills. Solo tú escribes en los dos. Si el ciclo salió limpio, no inventes una lección: un ledger
 inflado no se relee.
+
+## Comandos largos: a fichero y por exit code, NUNCA por su salida
+
+**Medido en #91.** Un builder terminó de escribir el código y **se colgó 12 minutos después**,
+intentando leer la salida de sus propios tests desde `~/.local/share/opencode/tool-output/`.
+OpenCode vuelca las salidas grandes a fichero, y releerlas cuelga su capa de herramientas: coste
+`$0.00`, cero progreso, y un spinner que parece trabajo. El código ya estaba bien; lo que se perdió
+fue la verificación.
+
+Todo comando que pueda producir mucha salida (`zig build`, `zig build test`, `git diff` de un
+archivo grande) se corre así, **sin tubería y sin capturar la salida en el resultado de la
+herramienta**:
+
+```sh
+zig build test > test-<N>.log 2>&1; echo "test=$?"
+```
+
+- El **exit code es el veredicto**. `test=0` es verde; no hace falta leer nada más.
+- Si falla, lee **solo el final del fichero por rango** (`tail -30 test-<N>.log`, o `read` con
+  `offset`), nunca el log entero ni el volcado de la herramienta.
+- **Nunca `cmd | tail` ni `cmd | grep`**: devuelven el exit code del último comando de la tubería,
+  que es 0 siempre, y además vuelven a arrastrar toda la salida.
+- El `.log` es un artefacto temporal: no se commitea.
+
+Es la misma disciplina que el repo ya exige para los gates mecánicos (`cmd >/dev/null 2>&1; echo $?`),
+extendida al motivo por el que aquí además **cuelga**, no solo miente.
