@@ -22,6 +22,7 @@ seguro; una suposición con forma de dato, no.
 
 Skills del repo en `.claude/skills/`: `zig-libghostty` (APIs verificadas, contrato de filas sucias) y
 `omarchy-app` (rutas, temas, notificaciones, barra, empaquetado). Cárgalas según el `area:*` del issue.
+El enjambre OpenCode tiene su copia en `.opencode/skills/`.
 
 ## Reglas duras de código
 
@@ -74,6 +75,46 @@ con spec, firmas citadas y escenarios Gherkin, aprobado **antes** de escribir c�
 | `qa` | Claude Sonnet | `.claude/agents/` |
 | `auditor` | Claude **Opus** — nunca se abarata | `.claude/agents/` |
 | Fallbacks de builder | Claude Sonnet | `.claude/agents/` |
+
+### El enjambre OpenCode (#91) — la alternativa, no el reemplazo
+
+El enjambre **Claude sigue siendo el de referencia**. Junto a él vive una contraparte OpenCode en
+`.opencode/`, para el caso de uso **fleet mixto**: un orquestador Claude lanza un pane OpenCode por
+issue, y ese OpenCode corre `/kelpie-flow <N>` con sus propios subagentes.
+
+Esto **no contradice #85/#87**, que descalificaron `opencode run` como **arnés headless** por tres
+fallos medidos: sin memoria entre invocaciones, stdout bufferizado y builders ciegos a las skills.
+Los tres son del arnés, no del runtime: con la herramienta `task` dentro de una sesión viva, la
+ronda de corrección reanuda la misma tarea, el reporte llega directo y las skills cargan desde
+`.opencode/skills/`. Lo que **sigue prohibido** es recrear un lanzador headless equivalente a
+`scripts/kelpie-builder` para OpenCode.
+
+| Rol | Motor | Dónde |
+|---|---|---|
+| `pm` (`mode: primary`) | `opencode-go/muse-spark-1.3-contributor` | `.opencode/agents/` |
+| `core-builder` / `ui-builder` | `mimo/mimo-v2.5-pro` | `.opencode/agents/` |
+| `docs-writer` | `mimo/mimo-v2.5` | `.opencode/agents/` |
+| `qa` | `opencode-go/deepseek-v4-flash` | `.opencode/agents/` |
+| `auditor` | **Claude Opus, en un pane aparte** | `.opencode/agents/` |
+| Fallbacks de builder | `opencode-go/glm-5.3` (otra familia a propósito) | `.opencode/agents/` |
+
+**El auditor nunca se abarata, y aquí eso cuesta un pane.** OpenCode no tiene ningún provider de
+Anthropic en esta máquina (`opencode models | awk '/anthropic|claude/'` → vacío), así que su agente
+`auditor` **no audita**: abre un pane con `herdr agent start --kind claude` y delega en Opus. Con
+herdr esa puerta va en las dos direcciones, así que **la elección de motor por rol ya no la limita
+qué providers tiene cada CLI**.
+
+Tres reglas que no se deducen leyendo los archivos, y que costaron una prueba cada una:
+
+- El pane se arranca con `herdr agent start <n> --kind opencode --pane <ID> -- --agent pm`. **Sin
+  `-- --agent pm` arranca el agente `build`** y no se carga ningún rol del enjambre.
+- El prefijo de procedencia del fleet es una **línea literal**:
+  `[FLEET] orquestador=<pane> issue=<N> worktree=<ruta> gates=scope,diseño merge=humano`. Un prefijo
+  en prosa se rechaza, y el PM hace bien: la procedencia se prueba, no se declara.
+- Los agentes van en `.opencode/agents/` (**plural**). `.opencode/agent/` no lo lee OpenCode.
+
+Protocolo de comunicación de los cinco canales, con la evidencia de su primera ejecución:
+`.opencode/protocol.md`.
 
 **Verificación sobre confianza:** el PM lee el `git diff` real y **verifica la tabla de citas del
 builder ejecutando `sed -n`**. Una cita falsa rechaza el diff aunque compile — ese es el caso
