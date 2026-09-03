@@ -422,8 +422,8 @@ fn ensureSidebarInited() void {
 }
 
 /// Row activation from a click (`gtk.ListView`'s single-click-activate,
-/// criterio 6). Spawns the external attach (#19, design #19) on a detached
-/// thread — never blocks the GTK main loop.
+/// criterio 6). Spawns the external attach on a detached thread — never
+/// blocks the GTK main loop.
 fn onSidebarActivated(_: ?*anyopaque, device: []const u8, pane: []const u8) void {
     _ = device; // not used this round — TARGET is just the pane
 
