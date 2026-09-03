@@ -111,3 +111,35 @@ test "buildAttachArgv: exact 11-element array in order" {
     try testing.expectEqualStrings("p1", argv[9]);
     try testing.expectEqualStrings("--takeover", argv[10]);
 }
+
+test "formatAttachAppIdFlag: empty pane still produces a valid flag" {
+    var buf: [256]u8 = undefined;
+    const result = try formatAttachAppIdFlag(&buf, "");
+    try testing.expectEqualStrings("--app-id=io.github.alejodelosrios.kelpie.attach.", result);
+}
+
+test "buildAttachArgv: empty pane is passed through as-is (not our job to validate)" {
+    const flag = "--app-id=io.github.alejodelosrios.kelpie.attach.";
+    const argv = buildAttachArgv(flag, "");
+    try testing.expectEqualStrings("", argv[9]);
+}
+
+// `spawnAttach` uses a 256-byte stack buffer for the `--app-id=` flag
+// (prefix "io.github.alejodelosrios.kelpie.attach." is 39 bytes + 9 for
+// "--app-id=" = 48 bytes of fixed overhead). A `pane` longer than 208 bytes
+// overflows that buffer. `pane` is a herdr-assigned identifier, not user
+// input (see design's "Riesgos y preguntas abiertas"), so this is a
+// documented edge rather than a crash risk — but it must fail as an *error*,
+// never silently truncate or panic.
+test "formatAttachAppIdFlag: pane too long for a 256-byte buffer returns NoSpaceLeft, not a panic" {
+    var buf: [256]u8 = undefined;
+    const long_pane = "p" ** 209; // 48 (fixed overhead) + 209 > 256
+    try testing.expectError(error.NoSpaceLeft, formatAttachAppIdFlag(&buf, long_pane));
+}
+
+test "formatAttachAppIdFlag: pane exactly at the 256-byte boundary still fits" {
+    var buf: [256]u8 = undefined;
+    const boundary_pane = "p" ** 208; // 48 + 208 == 256, exact fit
+    const result = try formatAttachAppIdFlag(&buf, boundary_pane);
+    try testing.expectEqual(@as(usize, 256), result.len);
+}
