@@ -12,7 +12,8 @@ permission:
   external_directory:
     "/home/alejodelosrios/.cache/ghostty-build/*": allow
     "/tmp/*": allow
-    "/home/alejodelosrios/Documents/Sites/kelpie*": allow
+    "/home/alejodelosrios/Documents/Sites/kelpie/*": allow
+    "/home/alejodelosrios/Documents/Sites/kelpie-*": allow
     "/usr/share/omarchy/*": allow
     "/usr/lib/zig/*": allow
 ---
@@ -119,7 +120,7 @@ Wayland: descríbele exactamente qué mirar y qué constituye fallo.
 ## Archivos grandes: SIEMPRE por rango, nunca enteros
 
 **Medido en #91, no supuesto.** La herramienta `read` de OpenCode sobre un archivo grande
-(`src/model/Store.zig`, 1800 líneas) **se cuelga en un bucle local**: 190% de CPU real sostenido,
+(`src/model/Store.zig`, 1946 líneas) **se cuelga en un bucle local**: 190% de CPU real sostenido,
 **$0.00 de coste** —o sea que ni siquiera llega a llamar al modelo— y cero bytes escritos. Desde
 fuera es idéntico a un builder leyendo tranquilo, y así se perdieron dos rondas.
 
@@ -128,7 +129,7 @@ La regla, con su evidencia:
 | Operación | Resultado medido |
 |---|---|
 | `read` completo de 368 líneas | ✅ segundos |
-| `read` completo de 1800 líneas | ❌ cuelgue indefinido |
+| `read` completo de 1946 líneas | ❌ cuelgue indefinido |
 | `read` con `offset`/`limit` de 110 líneas sobre ese mismo archivo de 1800 | ✅ 19 s |
 
 **Antes de leer un archivo, mira su tamaño en LÍNEAS Y EN BYTES**:

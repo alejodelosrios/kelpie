@@ -469,3 +469,9 @@ Formato: `- [YYYY-MM-DD] #issue — qué se vio · por qué no se arregló ahora
   de expresarlas relativas y el enjambre no arranca sin ellas · lo dispara cualquier clon del repo en
   otra máquina o con el checkout en otra ruta: los agentes cargarán pero se bloquearán en el primer
   acceso.
+
+- **El flaky de `LocalServer` acaba de teñir de rojo un gate correcto, en vivo** · el gate mecánico de
+  #91 —un issue que **no toca una línea de `src/`**— salió `test=1` por el errno 111, y el reintento
+  inmediato salió `test=0` con el árbol idéntico · tercera medición independiente (QA de #93, auditor
+  de #93 con 2 de 4, y esta) · confirma que va a bloquear merges al azar y que la regla «nada se
+  mergea en rojo» se vuelve ruido si el rojo es una moneda al aire.
