@@ -30,7 +30,9 @@ Argumento: `$ARGUMENTS` — número(s) de issue de `alejodelosrios/kelpie`.
    15ff186f65ca0bdbd1fa397ab03908d59de16463` antes de seguir. **Sin mirror no hay Apply**: es la
    única fuente de verdad de las firmas y sin ella el builder alucina.
 5. Lee SOLO los archivos que el issue nombra. Nada de volcar el repo.
-5b. **Lee `lessons-learned.md`.** Es la memoria del enjambre: lo que ya hizo fallar un ciclo. Si
+5b. **Lee SOLO el digest «Reglas vigentes» de `lessons-learned.md`** (cabecera del archivo, ≤ 7 KB;
+   la tabla histórica de > 100 KB se consulta **por rango** únicamente cuando el digest remite a una
+   fila). Es la memoria del enjambre: lo que ya hizo fallar un ciclo. Si
    alguna fila toca el territorio, el motor o el tipo de cambio de este issue, dilo en el scope gate
    y hazla explícita en el diseño. Un ledger que no se relee es peor que no tenerlo.
 6. Escribe el state file `.claude/state/<N>.json`:
@@ -77,9 +79,10 @@ gate barato: corregir el plan cuesta un mensaje, corregir el Apply cuesta el cic
 recorte de alcance ya se negoció ahí, así que el diseño es la traducción de un contrato que el humano
 ya aceptó — no una decisión nueva. El PM investiga, valida las citas por su cuenta y aprueba.
 
-**El único gate humano es el MERGE a `develop`.** Ahí se prueba lo construido antes de juntarlo. Un
-gate humano por cada diseño convierte al humano en cuello de botella de tres hijos en paralelo, que
-es exactamente lo que el fleet existe para evitar.
+**No hay gate humano en el camino feliz** (decisión del dueño, 2026-09-04): el merge a `develop` lo
+ejecuta el PM con CI verde y auditoría `APROBADO`, y avisa al dueño. El humano entra solo por
+escalado. Un gate humano por diseño o por merge convierte al humano en cuello de botella de tres hijos
+en paralelo, que es exactamente lo que el fleet existe para evitar.
 
 Se escala al humano, en cualquier fase: un spike que **falla su criterio binario**, una
 contradicción entre el issue y el código, un auditor que DENIEGA dos veces, y todo merge.
@@ -203,16 +206,6 @@ El reporte del builder **no es evidencia**. En este orden:
    >
    > Un Apply incompleto —archivos del diseño que faltan en el diff— **sí** es fallback legítimo.
 
-   **Antes de declarar un fallback por "el builder no produjo nada", comprueba las dos causas
-   instrumentales primero** — en la Ola 1 de M1 las dos se confundieron con un motor roto y costaron
-   dos fallbacks innecesarios:
-   - ¿lo lanzaste **sin `script`**? Entonces el log vacío es el buffer, no el builder.
-   - ¿lo mataste con **`timeout 900`**? Entonces lo mataste tú a mitad de trabajo; el log de #13
-     terminaba en seco dentro de un `sed` de verificación, sin un solo error.
-
-   Un Apply incompleto (archivos del diseño que faltan en el diff) **sí** es fallback legítimo:
-   ahí el builder terminó y entregó de menos.
-
 ## FASE 6 — QA (subagente Claude `qa`)
 
 Pásale el diseño y el diff. Escribe/ejecuta tests Zig que cubran **cada escenario Gherkin**.
@@ -226,12 +219,13 @@ Veredicto **binario**: `APROBADO` o `DENEGADO` con lista de hallazgos. Busca lo 
 memoria (allocator, `defer`, fugas), `unreachable` en camino de error, concurrencia (el mutex del
 terminal, pintar desde el hilo lector), APIs inventadas que el compilador aceptó por coincidencia,
 y escritura en `/usr/share/omarchy/` (prohibido).
-Pásale también `lessons-learned.md`: una de sus tareas es **cruzar el diff contra el ledger**
+Pásale también el digest «Reglas vigentes» de `lessons-learned.md` (y las filas que cite, por
+rango): una de sus tareas es **cruzar el diff contra el ledger**
 —¿este cambio repite algo que ya falló?—. Es el rol con más incentivo para encontrarlo.
 
 **Máximo 2 iteraciones.** Si a la segunda sigue DENEGADO, para y escala al humano.
 
-## FASE 8 — Docs, PR y merge gate  🛑 GATE HUMANO
+## FASE 8 — Docs, PR y merge (autónomo con CI verde + auditoría APROBADA)
 
 1. Si el cambio altera arquitectura o una decisión irreversible → ADR nuevo en `docs/adr/`.
    Docs de usuario → `docs-writer`.
@@ -266,7 +260,13 @@ Pásale también `lessons-learned.md`: una de sus tareas es **cruzar el diff con
    >
    > El ruleset de GitHub bloquea el merge sin `build` verde y exige la rama al día — pero **la
    > regla no depende del ruleset**: si mañana alguien afloja la protección, esto sigue vigente.
-6. **DETENTE. El merge lo aprueba el humano.** Es el gate final del dueño.
+6. **Merge autónomo (decisión del dueño, 2026-09-04).** Con las tres condiciones de arriba en verde
+   **y** el veredicto `APROBADO` del auditor escrito en `audit-<N>.md`, mergeas tú:
+   `gh pr merge <PR> --squash --delete-branch` y verificas releyendo `gh pr view <PR> --json state`
+   (`MERGED`). Después avisas al dueño por herdr (`herdr notification show` o el pane del orquestador):
+   número de PR, issue, qué entró y qué quedó en `CONCERNS.md`. **Se sigue escalando al humano** —y no
+   se mergea— si: un spike falló su criterio binario, hay contradicción issue/código, o el auditor
+   denegó **sobre la spec**. El ruleset de GitHub bloquea igual cualquier merge en rojo.
 7. Tras el merge, **en este orden** (el worktree antes que la rama, o el borrado falla):
 
    ```sh

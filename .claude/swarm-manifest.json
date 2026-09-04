@@ -2,7 +2,18 @@
   "proyecto": "kelpie",
   "generado_por": "/swarm-architect",
   "generado": "2026-08-26 · migrado a Claude Code + MiMo el 2026-09-02 (#85)",
-  "arquetipo": "B-hibrido-claude-code-mimo",
+  "arquetipo": "C-fleet-mixto-herdr (fleet) + B-hibrido-claude-code-mimo (flow standalone)",
+  "arquetipo_2026_09_04": "Fleet mixto sobre herdr 0.8.2: el orquestador Claude (Opus) abre un pane por issue y arranca `herdr agent start pm-N --kind opencode -- --agent pm`; ese PM (opencode-go/muse-spark-1.3-contributor, decisión del dueño) lanza builders/QA por `task` y abre de vuelta un pane Claude Opus como auditor (canal 5). Protocolo canónico de cinco canales + higiene de herramientas + API de herdr: .opencode/protocol.md (11 archivos lo referencian, verificable con grep -l). Siete principios operativos auditables por /swarm-sync: ver base-mechanics.md. Lo de abajo (arquetipo B) sigue vigente para /kelpie-flow standalone y como fallback sin OpenCode.",
+  "protocolo": ".opencode/protocol.md",
+  "principios_2026_09_04": {
+    "1_orquestador_no_ejecuta": "kelpie-fleet.md: los hotspots los edita un builder lanzado por el orquestador, nunca él; lección #91 (script → builder → verificar).",
+    "2_permisos_autonomia": ".claude/settings.json.proposed (el clasificador de auto-mode no deja a un agente escribir settings.json; el dueño lo renombra). OpenCode: external_directory en opencode.json Y en cada agente.",
+    "3_tiering": "orquestador Opus · pm opencode-go/muse-spark-1.3-contributor · builders mimo-v2.5-pro · docs mimo-v2.5 · qa deepseek-v4-flash · fallback glm-5.3 · auditor Claude Opus 5 (obligatorio)",
+    "4_canal_bidireccional": "prefijo [FLEET] literal + «responde por este pane» + anuncio de --wait; hooks herdr al día (claude v8, opencode v10, pi v8). Canal 1 hacia el PM OpenCode = superficie `pane` (`pane run` + `pane send-keys enter` + `pane read` para confirmar en pantalla), que es el mecanismo con el que corrió #91; `herdr agent prompt` es para panes Claude — con OpenCode 1.18.27 devolvió `agent_prompt_stalled` sin arrancar turno en cinco intentos (2026-09-04). Camino alterno para smoke tests sin TUI: servidor HTTP de la propia TUI (`--port 41NN` + POST /session/<id>/message), verificado con PONG opencode-go/muse-spark-1.3-contributor; esa sesión no publica agent_status.",
+    "5_presupuesto_arranque": "medido 2026-09-04: protocol.md 18 KB · kelpie-fleet.md 16 KB · kelpie-flow.md 18 KB · CLAUDE.md 8 KB (AGENTS.md es symlink) · digest de lessons-learned ≈7 KB (la tabla de 105 KB ya no se lee entera). Roles: 77.5 KB → 57.3 KB tras deduplicar.",
+    "6_indexador": "codegraph-zig (suatkocar 0.2.5) declarado en .opencode/opencode.json (#100); @colbymchenry/codegraph no indexa Zig (0 nodos medidos). Verificar `test -x .tools/codegraph-zig` en cada host.",
+    "7_concise": "outputStyle Concise en ~/.claude/settings.json (usuario) y en settings.json.proposed del repo; OpenCode sin outputStyle: plantilla del canal 4 en el prompt de cada agente."
+  },
   "arquetipo_nota": "Híbrido: el ARNÉS es Claude Code en los cinco roles, el MODELO de los tres builders es MiMo de Xiaomi. Migrado desde OpenCode el 2026-09-02 (issue #85) tras medirlo en trabajo real durante #84. Lo que decidió la migración no fue calidad de diff —era comparable— sino tres fallos de arnés que costaron un ciclo entero: (1) `opencode run` no tiene memoria entre invocaciones, así que una ronda de corrección era un agente nuevo que leía el árbol, veía la spec ya implementada y salía exit 0 sin editar; el PM lo contó como muerte del motor y disparó un fallback innecesario. (2) OpenCode bufferea stdout fuera de una TTY, obligando a envolver todo Apply en `script -qefc` para poder vigilarlo. (3) El builder no veía las skills del repo, que son justo el contrato de APIs que más falta le hace a un modelo externo en este stack. Las cinco defensas siguen intactas y son lo que sostiene la apuesta, no el modelo: gate mecánico de zig, contrato de citas verificado con sed, mirror pinneado obligatorio, territorio congelado, y smoke test antes de cada Apply. El auditor sigue en Claude Opus: eso no se abarata.",
   "stack": {
     "lenguaje": "zig",
@@ -34,7 +45,7 @@
     "issues_escribibles": true,
     "issues_nota": "53 issues ya enriquecidos (Contexto/Alcance/Criterios binarios/Referencias file:line/Skills) + 7 milestones M0-M6, materializados desde roadmap/issues/*.md por scripts/gh-roadmap.sh. Esa precondición es lo que habilita bajar el PM hijo del fleet a Sonnet."
   },
-  "merge_gate": "pr-a-develop",
+  "merge_gate": "pr-a-develop + merge autónomo del PM con CI verde y auditoría APROBADA (decisión del dueño 2026-09-04); main sigue siendo del dueño",
   "ci_verde_requerido": true,
   "ci_nota": "Repo público => Actions ilimitadas y rulesets disponibles en plan Free. El ruleset 'protege-develop-y-main' (id 21614336) exige PR + check 'build' verde + strict (rama al día, fuerza rebase) y prohíbe force-push y borrado en develop y main. El CI verde NO depende de que el PM se acuerde: lo bloquea GitHub. required_approving_review_count=0 porque es un repo de un solo dueño: el gate humano es que él mismo mergea.",
   "ramas_sobreviven_fleet": false,

@@ -109,3 +109,7 @@ Reporta: archivos tocados, qué hace el cambio, qué te pidieron y **no** hicist
 preguntas abiertas, la **tabla de citas**, y —por cada test nuevo— **el sabotaje que lo vio en rojo**
 con su mensaje. Un test que nunca se vio fallar no prueba nada. El PM lee tu `git diff` real: tu
 resumen no es evidencia.
+
+## Salida concisa (agente → agente)
+
+Tu lector es el PM, no un humano: reporta **solo** con la plantilla del canal 4 (`.opencode/protocol.md`): archivos tocados · tabla de citas · lo no hecho y por qué · preguntas abiertas · sabotaje de cada test. Sin narración ni resumen del proceso.

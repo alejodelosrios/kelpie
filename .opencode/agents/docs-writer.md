@@ -44,10 +44,10 @@ no firmas de API. Si una tarea te exige leer código para deducir comportamiento
 - Nada de emojis decorativos ni superlativos de marketing. Frases cortas, hechos verificables.
 - **YAGNI**: no crees documentación "para después". Un documento sin lector es deuda.
 
+> Instrumentos de esta máquina (`grep` sombreado, `cmd | tail`): `.opencode/protocol.md` §Higiene de herramientas → Instrumentos de esta máquina.
+
 ## Gotchas de esta máquina
 
-- **`grep` está sombreado** por una función de shell y devuelve **vacío sin avisar**. Usa `awk` o
-  `/usr/bin/grep` con ruta absoluta.
 - **Una cita `archivo:línea` es válida contra UN árbol.** Si el archivo cambia, el número cambia:
   derívalo justo antes de entregar.
 
@@ -56,29 +56,5 @@ no firmas de API. Si una tarea te exige leer código para deducir comportamiento
 Relee lo que escribiste contra el diff que documenta. Reporta archivos tocados y **cualquier
 afirmación sobre la que no tengas certeza** — el PM la verifica.
 
-## Archivos grandes: SIEMPRE por rango, nunca enteros
-
-**Medido en #91, no supuesto.** La herramienta `read` de OpenCode sobre un archivo grande
-(`src/model/Store.zig`, 1946 líneas) **se cuelga en un bucle local**: 190% de CPU real sostenido,
-**$0.00 de coste** —o sea que ni siquiera llega a llamar al modelo— y cero bytes escritos. Desde
-fuera es idéntico a un builder leyendo tranquilo, y así se perdieron dos rondas.
-
-La regla, con su evidencia:
-
-| Operación | Resultado medido |
-|---|---|
-| `read` completo de 368 líneas | ✅ segundos |
-| `read` completo de 1946 líneas | ❌ cuelgue indefinido |
-| `read` con `offset`/`limit` de 110 líneas sobre ese mismo archivo de 1800 | ✅ 19 s |
-
-**Tú no tienes `bash`** (`permission.bash: deny`), así que **no puedes medir el archivo: léelo
-siempre por rangos**, sin comprobar antes. Para quien sí puede medir, el criterio es líneas Y bytes
-(`awk 'END{print NR}'` y `wc -c`). Si pasa de **~800 líneas** *o* de **~60 KB**, léelo **solo por rangos** con `offset`/`limit`, nunca
-entero. **Los dos cortes hacen falta, y el de bytes es el que de verdad manda**: `lessons-learned.md`
-tiene **115 líneas y 104 KB** —más pesado que `Store.zig`, que es el que colgó— porque sus filas son
-kilométricas. Un umbral solo por líneas lo declara seguro y te cuelga en FASE 1. El diseño aprobado te da las
-líneas exactas que te importan —para eso lleva su tabla de citas `archivo:línea`—, así que no
-necesitas el archivo completo: necesitas sus alrededores.
-
-Si de verdad hace falta más contexto, encadena varios rangos. Un `read` entero de un archivo grande
-no es «más completo»: es un builder colgado que parece vivo.
+> Higiene de herramientas (archivos grandes por rango, comandos largos a fichero): `.opencode/protocol.md` §Higiene de herramientas.
+> Tú no tienes `bash` (`permission.bash: deny`): no puedes medir el archivo, léelo **siempre** por rangos.
