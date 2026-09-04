@@ -56,10 +56,10 @@ Dos puertas: **`/kelpie-flow <N>`** para un issue, **`/kelpie-fleet <N> <M> …`
 te redirige si le pasas más de uno). Helpers: `/kelpie-issue` y `/kelpie-research`.
 
 Pipeline: contexto → scope gate → diseño + Gherkin → Apply → verificación → QA →
-auditoría adversaria → docs + PR + CI verde (🛑 **gate humano: el merge**) → cierre.
+auditoría adversaria → docs + PR + CI verde → **merge autónomo a `develop` + aviso al dueño** → cierre.
 
 Los gates de scope y de diseño **los aprueba el PM** — el issue viene enriquecido, así que el diseño
-traduce un contrato ya aceptado. **El gate humano es el merge**, más lo que se escala siempre: un
+traduce un contrato ya aceptado. **El merge también es del PM** (CI verde + auditoría APROBADA, decisión del dueño 2026-09-04); el humano recibe el aviso y entra solo por lo que se escala siempre: un
 spike que falla su criterio binario, una contradicción issue/código, un auditor que deniega dos
 veces.
 
@@ -76,11 +76,22 @@ con spec, firmas citadas y escenarios Gherkin, aprobado **antes** de escribir c�
 | `auditor` | Claude **Opus** — nunca se abarata | `.claude/agents/` |
 | Fallbacks de builder | Claude Sonnet | `.claude/agents/` |
 
-### El enjambre OpenCode (#91) — la alternativa, no el reemplazo
+### El enjambre OpenCode (#91) — el camino del fleet mixto
 
-El enjambre **Claude sigue siendo el de referencia**. Junto a él vive una contraparte OpenCode en
-`.opencode/`, para el caso de uso **fleet mixto**: un orquestador Claude lanza un pane OpenCode por
-issue, y ese OpenCode corre `/kelpie-flow <N>` con sus propios subagentes.
+Los dos enjambres conviven y comparten protocolo. **El fleet lanza PMs OpenCode** (decisión del dueño
+2026-09-04: el PM va en Muse Spark; el auditor, en Claude Opus 5 siempre): el orquestador Claude abre un
+pane por issue con `herdr agent start … --kind opencode -- --agent pm`, y ese PM corre `/kelpie-flow <N>`
+con sus propios subagentes. El `/kelpie-flow` de `.claude/` sigue siendo el camino standalone (un
+humano y un issue) y el fallback cuando OpenCode no está en la máquina.
+
+**Siete reglas operativas que rigen a los dos** (detalle: `.opencode/protocol.md` y el general
+`~/.claude/skills/swarm-architect/references/base-mechanics.md` → «Los siete principios»): el
+orquestador no escribe código ni docs (script → builder → verificar); permisos para trabajar sin humano
+(`.claude/settings.json`, `external_directory` en cada agente OpenCode); tiering por tipo de trabajo;
+canal bidireccional escrito en cada rol (`grep -l protocol.md` lista a todos); **presupuesto de carga de
+arranque** — `AGENTS.md` es un symlink a este archivo, los bloques comunes viven una vez en el protocolo,
+y de `lessons-learned.md` se lee **solo el digest «Reglas vigentes»** (la tabla, por rango); indexador
+verificado (`codegraph-zig`, spike #100); salida concisa entre agentes (`outputStyle: Concise`).
 
 Esto **no contradice #85/#87**, que descalificaron `opencode run` como **arnés headless** por tres
 fallos medidos: sin memoria entre invocaciones, stdout bufferizado y builders ciegos a las skills.
@@ -109,7 +120,7 @@ Tres reglas que no se deducen leyendo los archivos, y que costaron una prueba ca
 - El pane se arranca con `herdr agent start <n> --kind opencode --pane <ID> -- --agent pm`. **Sin
   `-- --agent pm` arranca el agente `build`** y no se carga ningún rol del enjambre.
 - El prefijo de procedencia del fleet es una **línea literal**:
-  `[FLEET] orquestador=<pane> issue=<N> worktree=<ruta> gates=scope,diseño merge=humano`. Un prefijo
+  `[FLEET] orquestador=<pane> issue=<N> worktree=<ruta> gates=scope,diseño merge=auto`. Un prefijo
   en prosa se rechaza, y el PM hace bien: la procedencia se prueba, no se declara.
 - Los agentes van en `.opencode/agents/` (**plural**). `.opencode/agent/` no lo lee OpenCode.
 
@@ -125,8 +136,10 @@ secuencia (core primero, verificar, commitear, luego ui).
 
 Dos ledgers append-only que solo el PM escribe, con fronteras distintas:
 `CONCERNS.md` = deuda del **producto**. `lessons-learned.md` = lo que hizo fallar un **ciclo del
-enjambre**, con la regla que lo evita — el PM lo lee en FASE 1 y el auditor cruza el diff contra él.
-El conocimiento del **stack** (firmas, rutas) no va a ningún ledger: va a las skills.
+enjambre**, con la regla que lo evita — el PM lee su **digest «Reglas vigentes»** en FASE 1 y el
+auditor cruza el diff contra él; la tabla histórica (> 100 KB) se consulta por rango. Quien añade una
+fila actualiza el digest en el mismo commit. El conocimiento del **stack** (firmas, rutas) no va a
+ningún ledger: va a las skills.
 
 ## YAGNI
 

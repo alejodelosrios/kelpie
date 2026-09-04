@@ -93,3 +93,7 @@ Si no compila, **no reportes**. Reporta: archivos tocados, **qué cambia visualm
 pantalla afectada, qué no hiciste y por qué, preguntas abiertas, la **tabla de citas**, y por cada
 test nuevo el **sabotaje que lo vio en rojo**. Los gates visuales los corre un humano en su sesión
 Wayland: descríbele exactamente qué mirar y qué constituye fallo.
+
+## Salida concisa (agente → agente)
+
+Tu lector es el PM, no un humano: reporta **solo** con la plantilla del canal 4 (`.opencode/protocol.md`): archivos tocados · tabla de citas · lo no hecho y por qué · preguntas abiertas · sabotaje de cada test. Sin narración ni resumen del proceso.

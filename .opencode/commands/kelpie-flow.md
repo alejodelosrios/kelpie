@@ -22,7 +22,9 @@ OpenCode a propósito. Con 0, pregunta cuál. Con 1, sigue.
 (**entra / no entra**), Criterios, Referencias y Skills. Carga las skills que el issue nombra
 (`.opencode/skills/`). Lee **solo** los archivos que el issue nombra.
 
-Lee `lessons-learned.md`: es la memoria del enjambre. Si alguna fila toca el territorio, el motor o
+Lee **solo el digest «Reglas vigentes»** de `lessons-learned.md` (cabecera, ≤ 7 KB; la tabla de
+> 100 KB por rango y solo si el digest remite a una fila — leerla entera te cuelga, §Higiene de
+herramientas). Es la memoria del enjambre. Si alguna regla toca el territorio, el motor o
 la forma de este cambio, **bájala a una obligación del diseño** con el rastro que deja — no basta
 citarla.
 
@@ -36,7 +38,7 @@ Resume en ≤10 líneas: qué se construye, qué archivos toca, qué NO entra, q
 - Con el **prefijo de procedencia del fleet**, cuya primera línea es exactamente:
 
   ```
-  [FLEET] orquestador=<pane-id> issue=<N> worktree=<ruta> gates=scope,diseño merge=humano
+  [FLEET] orquestador=<pane-id> issue=<N> worktree=<ruta> gates=scope,diseño merge=auto
   ```
 
   → el orquestador aprueba por el chat del pane: **reporta y sigue**. Solo escalas si hay
@@ -103,7 +105,7 @@ Commit convencional que explica el **por qué**. `gh pr create --base develop`, 
 > `mergeStateStatus == CLEAN`, **todos** los checks en `SUCCESS` (ninguno `PENDING`/`IN_PROGRESS`),
 > y `0` commits detrás de `develop`. Un `CLEAN` viejo miente.
 
-**El merge lo aprueba el humano.** Tras el merge: worktree fuera **antes** que la rama, borra la
+**Merge autónomo** (decisión del dueño 2026-09-04): con las tres condiciones en verde y `APROBADO` en `audit-<N>.md`, `gh pr merge <PR> --squash --delete-branch`, relee `gh pr view --json state` = `MERGED`, y avisa al dueño (herdr notification / pane del orquestador) con PR, issue y lo que entró en `CONCERNS.md`. Se escala en vez de mergear si: spike fallido, contradicción issue/código, o denegación **sobre la spec**. Tras el merge: worktree fuera **antes** que la rama, borra la
 rama local y la remota **explícitamente**, cierra el issue, y **cierra el pane del auditor** si
 quedó vivo. Para saber si una rama está mergeada pregúntale **al PR**, nunca al grafo: este repo
 mergea con squash.

@@ -1,0 +1,37 @@
+{
+  "_nota": "Propuesto por /swarm-architect 2026-09-04 (principios 2 y 7). El clasificador de auto-mode no deja a un agente escribir settings.json: el dueño lo renombra a settings.json tras revisarlo. Lectura y escritura en territorio allowlisteadas; merge a protegida, --force, secretos y pkill denegados.",
+  "outputStyle": "Concise",
+  "permissions": {
+    "defaultMode": "acceptEdits",
+    "allow": [
+      "Read(/tmp/claude-*/**)", "Write(/tmp/claude-*/**)", "Edit(/tmp/claude-*/**)",
+      "Read(~/.cache/ghostty-build/**)", "Read(/usr/lib/zig/**)", "Read(/usr/share/omarchy/**)",
+      "Bash(zig:*)",
+      "Bash(git status:*)", "Bash(git diff:*)", "Bash(git log:*)", "Bash(git show:*)",
+      "Bash(git add:*)", "Bash(git commit:*)", "Bash(git fetch:*)", "Bash(git pull:*)",
+      "Bash(git switch:*)", "Bash(git branch:*)", "Bash(git worktree:*)", "Bash(git stash list:*)",
+      "Bash(git push -u origin feature/*)", "Bash(git push -u origin fix/*)",
+      "Bash(git push -u origin docs/*)", "Bash(git push -u origin chore/*)",
+      "Bash(git push origin --delete feature/*)", "Bash(git push origin --delete fix/*)",
+      "Bash(git push origin --delete docs/*)", "Bash(git push origin --delete chore/*)",
+      "Bash(gh issue view:*)", "Bash(gh issue list:*)", "Bash(gh issue comment:*)", "Bash(gh issue close:*)",
+      "Bash(gh pr create:*)", "Bash(gh pr view:*)", "Bash(gh pr list:*)", "Bash(gh pr checks:*)",
+      "Bash(gh run view:*)", "Bash(gh api repos/alejodelosrios/kelpie/*)",
+      "Bash(herdr:*)",
+      "Bash(scripts/kelpie-builder:*)", "Bash(nohup timeout:*)",
+      "Bash(mkdir:*)", "Bash(cp:*)", "Bash(mv:*)", "Bash(touch:*)",
+      "Bash(sed -n:*)", "Bash(awk:*)", "Bash(/usr/bin/grep:*)", "Bash(wc:*)", "Bash(head:*)", "Bash(tail:*)",
+      "Bash(ls:*)", "Bash(cat:*)", "Bash(find:*)", "Bash(stat:*)", "Bash(test:*)", "Bash(jq:*)",
+      "Bash(python3:*)", "Bash(kill:*)", "Bash(pgrep -x:*)", "Bash(ps:*)", "Bash(echo:*)", "Bash(date:*)",
+      "Bash(dbus-run-session:*)", "Bash(timeout:*)"
+    ],
+    "deny": [
+      "Bash(git push origin main:*)", "Bash(git push origin HEAD:main)", "Bash(git push origin develop:*)",
+      "Bash(git push --force:*)", "Bash(git push -f:*)",
+      "Bash(git reset --hard:*)", "Bash(git stash:*)", "Bash(git add -A:*)",
+      "Bash(gh pr merge --admin:*)", "Bash(gh repo delete:*)", "Bash(gh secret:*)",
+      "Bash(rm -rf /:*)", "Bash(rm -rf ~:*)", "Bash(pkill:*)", "Bash(herdr server stop:*)",
+      "Read(~/.config/kelpie/**)", "Read(~/.config/mimo/**)", "Read(./.env*)"
+    ]
+  }
+}

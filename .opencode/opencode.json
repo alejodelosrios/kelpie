@@ -10,10 +10,12 @@
       "enabled": true
     }
   },
+  "instructions": [".opencode/protocol.md"],
   "permission": {
     "external_directory": {
       "/home/alejodelosrios/.cache/ghostty-build/*": "allow",
       "/tmp/*": "allow",
+      "/tmp/claude-*": "allow",
       "/home/alejodelosrios/Documents/Sites/kelpie/*": "allow",
       "/home/alejodelosrios/Documents/Sites/kelpie-*": "allow",
       "/usr/share/omarchy/*": "allow",

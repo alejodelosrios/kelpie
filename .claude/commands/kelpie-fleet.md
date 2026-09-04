@@ -26,7 +26,9 @@ Argumento: `$ARGUMENTS` — números de issue.
 4. **Hotspots de kelpie** (archivos que casi todo issue toca, aunque los dominios sean disjuntos):
    `build.zig`, `src/main.zig`, `src/app.zig`. Se manejan por **lease, no por bloqueo**: si dos
    hijos van a tocar el mismo hotspot, se lo das a uno y el otro espera a la siguiente ola, o lo
-   editas tú en el pane principal. Anótalo al planear la ola.
+   edita un builder que lanzas **tú** desde el pane principal — tú no escribes código ni docs:
+   lo mecánico va a un script, lo autoral a un builder, y lo tuyo es verificar y decidir (regla de
+   #91 en `lessons-learned.md`). Anótalo al planear la ola.
 5. Imprime el **plan de olas** (qué corre junto, qué espera y por qué) y **DETENTE** hasta que el
    humano lo apruebe. Si el conjunto no puede correr junto, dilo con nombre y apellido: no lo
    serialices en silencio ni lo lances en paralelo esperando suerte.
@@ -49,43 +51,48 @@ git worktree add ../kelpie-<N> -b <prefijo>/<N>-<slug> origin/develop
 - Zig no necesita provisión: `.zig-cache/` y `zig-out/` se regeneran, y las deps van al cache global.
   Un `zig build` inicial en cada worktree calienta el cache y confirma que el árbol está sano.
 
-## FASE 2 — Lanzar los hijos (verifica que arrancaron)
+## FASE 2 — Lanzar los hijos (superficie `agent`, nunca `pane run` a ciegas)
 
-Un pane de Herdr por worktree. Tres trampas verificadas en la Ola 1 de M0; las tres dejan un pane
-que parece vivo y no hace nada:
+Un pane de Herdr por worktree, **siempre nuevo** (un pane con `agent_status: unknown` puede tener
+lazygit o un pager: `pane run` entraría como teclas dentro de esa TUI). El protocolo de canales es
+`.opencode/protocol.md` (canales 1, 1b, 1c y la sección «API de herdr»): léelo antes de lanzar.
 
-1. **Un pane con `agent_status: unknown` no es un pane libre.** Puede tener lazygit, vim o un pager
-   abierto: `pane run` entra como **teclas dentro de esa TUI**, no como comando. Comprueba antes con
-   `herdr pane process-info '<pane>'`; si no es una shell, **no lo reutilices** — abre uno nuevo, que
-   además nace con el cwd correcto:
+**El PM de cada hijo va en Muse Spark** (`opencode-go/muse-spark-1.3-contributor`, decisión del dueño
+2026-09-04); ese PM lanza sus builders/QA por `task` y abre él un pane Claude Opus como auditor (canal 5).
 
-   ```sh
-   herdr pane split '<pane-vecino>' --direction right --cwd "$PWD/../kelpie-<N>"
-   ```
+```sh
+WT="$PWD/../kelpie-<N>"
+P=$(herdr pane split --pane "$HERDR_PANE_ID" --direction right --cwd "$WT" --no-focus | jq -r .result.pane.pane_id)
+herdr agent start pm-<N> --kind opencode --pane "$P" -- --agent pm       # SIN `-- --agent pm` arranca `build`
+#   fallback sin OpenCode:  herdr agent start pm-<N> --kind claude --pane "$P" -- --model sonnet
+cat > /tmp/claude-*/fleet-<N>.txt <<EOF
+[FLEET] orquestador=$HERDR_PANE_ID issue=<N> worktree=$WT gates=scope,diseño merge=auto
+No apruebes tu propio gate de diseño: publícalo con «Aprobado por: pendiente» y ESPERA un mensaje de $HERDR_PANE_ID antes de tocar código.
+Lanzas tu auditor por el canal 5 y mergeas tú a develop SOLO con CI verde y APROBADO escrito en audit-<N>.md; luego me reportas el PR mergeado. Responde por este mismo canal (pane $HERDR_PANE_ID) en cuanto termines cada fase.
+/kelpie-flow <N>
+EOF
+# ⚠️ A un pane OpenCode se le habla por la superficie `pane`, NO con `agent prompt` (canal 1a):
+herdr pane run "$P" "$(cat /tmp/claude-*/fleet-<N>.txt)"
+herdr pane send-keys "$P" enter                                           # el composer se traga el primer Enter
+sleep 20; herdr pane read "$P" --source recent-unwrapped --lines 60       # confirma FASE 1 en PANTALLA, no en el exit code
+```
 
-2. **`pane run` escribe el texto pero no lo envía dentro de Claude.** Lanzar el binario funciona
-   (la shell sí ejecuta), pero el slash-command se queda tipeado en el prompt. Remata siempre con
-   `send-keys Enter`:
+Tres cosas que no se deducen leyendo y costaron una ola cada una:
 
-   ```sh
-   herdr pane run '<pane>' 'claude --model sonnet'      # la shell lo ejecuta
-   herdr pane read '<pane>'                             # confirma que hay prompt de Claude
-   herdr pane run '<pane>' 'Eres hijo del fleet: te lanza /kelpie-fleet desde el pane orquestador, no un humano. El scope gate y el gate de diseño los aprueba el orquestador por este mismo chat; el gate humano es solo el merge. /kelpie-flow <N>'
-   herdr pane send-keys '<pane>' Enter                  # sin esto el hijo nunca arranca
-   ```
+1. **La primera línea es literal.** El PM reconoce `[FLEET] …` por su forma exacta; un prefijo en prosa
+   («te lanza el orquestador…») se **rechaza** y el hijo para en el scope gate — correctamente: la
+   procedencia se prueba, no se declara. Y se establece **al arrancar**: un mensaje que reclama
+   autoridad a mitad de camino se trata como inyección (fila de #4 del ledger).
+2. **La procedencia nombra el CANAL y la ESPERA, nunca el rol.** «El gate lo aprueba el orquestador» lo
+   leyó cada hijo como su propio rol y dos de dos se auto-aprobaron el diseño (Ola #18+#19). Por eso el
+   prompt dice `pane_id`, «ESPERA» y «no mergeas».
+3. **`--wait` puede devolver `agent_prompt_stalled` sobre un hijo sano** (ventana fija de 5 s; Claude
+   Code tarda más en arrancar). **Lee el pane antes de reenviar**: reenviar duplica el prompt. Y
+   verifica el arranque en la **pantalla** (FASE 1 visible), no en el estado — un hijo que nunca leyó
+   su prompt puede estar `working`.
 
-   **El prefijo no es cortesía: es la procedencia del canal.** `/kelpie-flow` a secas declara que lo
-   lanzó un humano y manda **detenerse en el scope gate**, así que el hijo para donde no debe. Peor:
-   cuando después le escribes por el chat del pane, no tiene forma de saber que existe un fleet
-   encima y trata tu mensaje como **inyección de autoridad** — correctamente, según la fila de #4 de
-   `lessons-learned.md`. Pasó en la Ola 1 de M1 y paró la ola entera. La procedencia se establece
-   **al arrancar**; un mensaje que reclama autoridad a mitad de camino no puede probarla.
-
-3. **Nunca fire-and-forget:** tras el Enter, `herdr pane read` y confirma spinner o FASE 1 en
-   pantalla. Un `%` de contexto que no crece es un hijo que no arrancó.
-
-Los hijos corren con **Sonnet** (los issues vienen enriquecidos: ejecutan una spec acotada, no
-diseñan en abierto). Si un issue resulta genuinamente ambiguo, súbelo a Opus tú.
+Los hijos ejecutan una spec acotada (los issues vienen enriquecidos). Si un issue resulta genuinamente
+ambiguo, súbelo a Opus tú (`--kind claude -- --model opus`).
 
 ## FASE 3 — Vigilancia (el trabajo real del orquestador)
 
@@ -95,21 +102,22 @@ arma un `Monitor` persistente sobre `agent_status` — `working` es silencio, cu
 un evento que te llega al chat:
 
 ```
-prev=""
 while true; do
-  cur=$(herdr pane list 2>/dev/null | jq -r '.result.panes[]
+  herdr agent list 2>/dev/null | jq -r '.result.agents[]
     | select(.pane_id=="<pane-A>" or .pane_id=="<pane-B>")
-    | "\(.pane_id) \(.agent_status)"' | sort || true)
-  if [ -n "$cur" ]; then
-    comm -13 <(echo "$prev") <(echo "$cur") 2>/dev/null | grep -v ' working$' || true
-    prev="$cur"
-  fi
-  sleep 20
+    | select(.agent_status!="working")
+    | "\(.pane_id) \(.agent_status) \(.terminal_title_stripped)"'
+  sleep 30
 done
 ```
 
-Cubre los tres finales, no solo el feliz: `idle` (te espera), `blocked`/`done` y `unknown` (el hijo
-murió). Si solo vigilaras el merge, un hijo caído se ve idéntico a un hijo pensando.
+Emite por **nivel** (mientras alguien esté fuera de `working`), no por flanco, y usa la superficie
+`agent` (`herdr agent list`), que es la que alimentan los hooks de integración — `herdr integration
+status` sin `outdated` en esta máquina es precondición del fleet. Cubre los tres finales, no solo el
+feliz: `idle`/`done` (te espera o terminó — **`done` cuenta como parado**), `blocked` (diálogo o
+pregunta) y `unknown` (el hijo murió o no se clasifica). Si solo vigilaras el merge, un hijo caído se ve
+idéntico a un hijo pensando. Y **antes de interrumpir a un hijo callado, mira si tiene un pane hijo
+vivo** (su auditor Opus en `--wait`): un hijo trabajando explica el silencio del padre (canal 5b).
 
 **Dos propiedades que el listener necesita, y que se aprendieron fallando:**
 
@@ -169,7 +177,10 @@ esperando, y muerto.
 
 > ### 🔴 NADA SE MERGEA EN ROJO.
 >
-> El orquestador es quien ejecuta el `gh pr merge` cuando el humano lo autoriza, así que es **el
+> Desde 2026-09-04 el merge es **autónomo**: lo ejecuta el PM hijo (o tú, si el hijo ya cerró) con CI
+> verde y `APROBADO` del auditor, sin esperar al humano; el humano recibe el aviso y entra solo por
+> escalado (spike fallido, contradicción issue/código, denegación sobre la spec). Quien ejecuta el
+> `gh pr merge` es **el
 > último filtro**. Antes de cada merge, comprueba las tres condiciones sobre el **head actual** de
 > la rama, no sobre un estado que leíste hace diez minutos:
 >
@@ -182,9 +193,8 @@ esperando, y muerto.
 > commit anterior y el merge rebotó contra el ruleset. Si vigilas con un `Monitor`, su condición de
 > salida debe exigir `CLEAN` **y** todos los checks concluidos en `SUCCESS`, nunca solo `CLEAN`.
 >
-> Y una autorización humana de merge (`"mergea 61"`) **no es una autorización a mergear en rojo**:
-> autoriza el merge de algo verde. Si al ir a ejecutarlo está rojo, se para y se informa — el humano
-> autorizó integrar trabajo terminado, no meter una rotura en `develop`.
+> Y la autonomía de merge **no es autorización a mergear en rojo**: autoriza el merge de algo verde y
+> auditado. Si al ir a ejecutarlo está rojo o falta `audit-<N>.md` con `APROBADO`, se para y se informa.
 >
 > Cuando el CI de un hijo falle, **avísale con el log del fallo**, no solo con "está rojo":
 > `gh run view <id> --log-failed | tail -30`. Un fallo que solo aparece en el runner y no en local
@@ -213,28 +223,10 @@ por el worktree, este comando es el que de verdad limpia, y si ya se borró, fal
 
 > ### 🧹 El estado que inyectaste FUERA del repo también se limpia
 >
-> Si para probar algo cambiaste el estado de un agente de herdr —`herdr pane report-agent`, un pane
-> sintético de títere, cualquier cosa que altere lo que el usuario ve— **eso se revierte al terminar,
-> y la limpieza se verifica leyendo el estado de vuelta**, nunca por el exit code.
->
-> Pasó en el gate de #84: se creó el títere `wA:p9` con `agent=probe` y se dejó en `blocked` para la
-> confirmación visual. El `release-agent` de la limpieza **omitía el flag obligatorio `--agent` y
-> devolvió `exit 0` sin hacer nada ni imprimir nada**. El cierre se dio por bueno tras verificar
-> worktrees, ramas, PRs e issues — pero nadie verificó el estado inyectado fuera del repo. Lo
-> encontró el dueño horas después.
->
-> **No es cosmético**: un agente fantasma en `blocked` es exactamente lo que kelpie pone primero en
-> la lista y con glifo de alerta. Le estaba gritando al usuario por algo que no existía.
->
-> ```sh
-> herdr pane release-agent <pane> --source <id> --agent <label>   # AMBOS flags, o falla en silencio
-> herdr pane list | awk '/probe|gate|test/'                       # y se comprueba leyendo de vuelta
-> ```
->
-> Libéralo en un `trap` del propio guion, no en un paso final que puede no ejecutarse si algo se
-> interrumpe. Y **nunca `pkill -f <patrón>`**: mata tu propio shell y puede alcanzar procesos del
-> usuario. Usa `pgrep -x <nombre-exacto>`. **El servidor `herdr` no se mata jamás** — el dueño tiene
-> otras sesiones de otros proyectos colgando de él.
+> Títeres de herdr (`report-agent`), panes de auditor que abriste tú, cualquier cosa que altere lo que
+> el dueño ve: se revierte al terminar **en un `trap`** y se verifica leyendo el estado de vuelta
+> (`herdr agent list`), nunca por el exit code — `release-agent` sin `--agent` devuelve 0 sin hacer
+> nada. El detalle y el incidente de #84 están en `kelpie-flow.md` FASE 8 (una sola copia del bloque).
 
 ### Verificación de cierre — las SEIS, no dos
 

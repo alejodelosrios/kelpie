@@ -21,10 +21,10 @@ no firmas de API. Si una tarea te exige leer código para deducir comportamiento
 - Nada de emojis decorativos ni superlativos de marketing. Frases cortas, hechos verificables.
 - **YAGNI**: no crees documentación "para después". Un documento sin lector es deuda.
 
+> Instrumentos de esta máquina (`grep` sombreado, `cmd | tail`): `.opencode/protocol.md` §Higiene de herramientas → Instrumentos de esta máquina.
+
 ## Gotchas de esta máquina
 
-- **`grep` está sombreado** por una función de shell y devuelve **vacío sin avisar**. Usa `awk` o
-  `/usr/bin/grep` con ruta absoluta.
 - **Una cita `archivo:línea` es válida contra UN árbol.** Si el archivo cambia, el número cambia:
   derívalo justo antes de entregar.
 
@@ -32,3 +32,7 @@ no firmas de API. Si una tarea te exige leer código para deducir comportamiento
 
 Relee lo que escribiste contra el diff que documenta. Reporta archivos tocados y **cualquier
 afirmación sobre la que no tengas certeza** — el PM la verifica.
+
+## Salida concisa (agente → agente)
+
+Tu lector es el PM, no un humano: reporta **solo** con la plantilla del canal 4 (`.opencode/protocol.md`): archivos tocados · tabla de citas · lo no hecho y por qué · preguntas abiertas · sabotaje de cada test. Sin narración ni resumen del proceso.
