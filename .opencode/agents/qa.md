@@ -3,6 +3,7 @@ description: QA de kelpie. Escribe y ejecuta tests Zig que cubren cada escenario
 mode: subagent
 model: opencode-go/deepseek-v4-flash
 permission:
+  codegraph-zig_*: allow
   read: allow
   glob: allow
   grep: allow

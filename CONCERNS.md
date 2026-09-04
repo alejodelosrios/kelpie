@@ -475,3 +475,19 @@ Formato: `- [YYYY-MM-DD] #issue — qué se vio · por qué no se arregló ahora
   inmediato salió `test=0` con el árbol idéntico · tercera medición independiente (QA de #93, auditor
   de #93 con 2 de 4, y esta) · confirma que va a bloquear merges al azar y que la regla «nada se
   mergea en rojo» se vuelve ruido si el rojo es una moneda al aire.
+
+- **`codegraph-zig` (#99) no es utilizable en los worktrees del fleet tal cual** · medido por el
+  auditor Opus con un worktree real: `.opencode/opencode.json:7` apunta con ruta absoluta al
+  checkout principal, y la DB se resuelve contra el cwd (`serve` falla con `database not found at
+  '.codegraph/codegraph.db'` en stdout), no contra el binario · como `.codegraph/` está ignorado y
+  no se copia al worktree, todo builder de `/kelpie-fleet` pierde la herramienta en silencio · no
+  bloqueó el spike (medido en este checkout, en verde), pero la adopción al fleet necesita issue
+  dedicado: indexar por worktree o resolver binario/índice relativos al proyecto.
+
+- **Dos cabos sueltos de #99 pendientes de la próxima sesión con restart** · (1) el prefijo
+  `codegraph-zig_*` sigue sin confirmar contra un cliente OpenCode vivo (`tools/list` devuelve
+  nombres crudos como `codegraph_callers`; el wildcard solo casa si OpenCode namespacea
+  `<servidor>_<tool>`) — si difiere, el síntoma es un diálogo de permiso, no una respuesta falsa, y
+  el arreglo es mecánico · (2) el call-graph Zig es incompleto: 5 llamadores directos de
+  `src/ui/sidebar.zig` (573, 608, 689, 756, 786) existen y no salen en `callers("applySnapshot")` —
+  el criterio binario (≥1 real) se cumplió con 4 verificados, pero la herramienta no es exhaustiva.

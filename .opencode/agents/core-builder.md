@@ -3,6 +3,7 @@ description: Builder del núcleo de kelpie (vt, render, pty, rpc, ssh, font, mod
 mode: subagent
 model: mimo/mimo-v2.5-pro
 permission:
+  codegraph-zig_*: allow
   read: allow
   glob: allow
   grep: allow
