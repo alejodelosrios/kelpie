@@ -10,6 +10,7 @@ permission:
   edit: allow
   bash: allow
   external_directory:
+    "/home/alejodelosrios/.cache/ghostty-build/*": allow
     "/tmp/*": allow
     "/home/alejodelosrios/Documents/Sites/kelpie*": allow
     "/usr/share/omarchy/*": allow
@@ -146,8 +147,16 @@ La regla, con su evidencia:
 | `read` completo de 1800 líneas | ❌ cuelgue indefinido |
 | `read` con `offset`/`limit` de 110 líneas sobre ese mismo archivo de 1800 | ✅ 19 s |
 
-**Antes de leer un archivo, mira cuántas líneas tiene** (`awk 'END{print NR}' <archivo>`). Si pasa de
-**~800**, léelo **solo por rangos** con `offset`/`limit`, nunca entero. El diseño aprobado te da las
+**Antes de leer un archivo, mira su tamaño en LÍNEAS Y EN BYTES**:
+
+```sh
+awk 'END{print NR" lineas"}' <archivo>; wc -c < <archivo>
+```
+
+Si pasa de **~800 líneas** *o* de **~60 KB**, léelo **solo por rangos** con `offset`/`limit`, nunca
+entero. **Los dos cortes hacen falta, y el de bytes es el que de verdad manda**: `lessons-learned.md`
+tiene **115 líneas y 104 KB** —más pesado que `Store.zig`, que es el que colgó— porque sus filas son
+kilométricas. Un umbral solo por líneas lo declara seguro y te cuelga en FASE 1. El diseño aprobado te da las
 líneas exactas que te importan —para eso lleva su tabla de citas `archivo:línea`—, así que no
 necesitas el archivo completo: necesitas sus alrededores.
 
