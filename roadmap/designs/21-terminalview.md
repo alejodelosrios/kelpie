@@ -23,7 +23,13 @@ reconstruido" → "fila subida al atlas"; el resto del cuerpo (mutex, `feed`, `c
 `resize`) sigue vigente.
 
 **Archivos que se tocan** (territorio de un solo builder; lease de la ola):
-- `src/terminal/TerminalView.zig` (nuevo) — el widget.
+- `src/terminal/TerminalView.zig` — el NÚCLEO: struct que posee en exclusiva `Terminal` +
+  `RenderState` + `mutex` + `Stream` persistente; `feed` (solo `nextSlice`), `resizeGrid`,
+  `countDirtyRows`, `clean`. Único dueño del estado VT.
+- `src/terminal/TerminalWidget.zig` (nuevo, enmienda G1 post-auditoría) — cáscara `gtk.GLArea` que
+  COMPONE un `*TerminalView` en heap y delega en él; NO duplica feed/resize/count/lock (el spinlock
+  propio se elimina: C1 resuelto por unificación). Renderer filas sucias→texturas + harness.
+  Regla: dos verdades sobre el mismo contrato no coexisten; el widget no posee VT propia.
 - `build.zig` — módulo propio + `addTest` (lease hotspot; patrón `theme_css_mod`).
 - `src/main.zig` — referencia del módulo en el bloque `test {}` (lease hotspot; sin esto sus tests
   nunca corren: el runner solo descubre el root + referencias explícitas).
@@ -69,7 +75,9 @@ heredada de Ghostty, #7 riesgo registrado): el criterio 2 lo mide, no lo presupo
 ## Cadena de activación (f108: una cita prueba que EXISTE, no que se EJECUTA)
 
 - `feed(bytes)` ← hilo lector (#23; en #21, el harness del criterio 2) → lock → `nextSlice` →
-  unlock → `g_idle_add`/`invoke` → UI: `gtk_gl_area_queue_render`.
+  unlock → `g_idle_add`/`invoke` → UI: `gtk_gl_area_queue_render`. El `Stream` es PERSISTENTE
+  (creado en `init`/`setup`, destruido en `deinit`): `Terminal.zig:374-379` exige reutilizarlo
+  porque cada `vtStream()` trae parser fresco y un lector por trozos parte escapes en frontera (A1).
 - `render` de `GLArea` (hilo UI, con contexto GL corriente) → lock → `beginUpdate` → unlock →
   subir solo filas sucias al atlas → `endUpdate` → `clean()` → contador de filas subidas del frame.
 - `resize` del widget → dimensiones de rejilla (matemática de celda: #22) →
@@ -113,6 +121,13 @@ Escenario: zig build test alimenta SGR + texto y comprueba sucias antes/después
   Cuando el test del módulo alimenta SGR + texto (patrón src/vt_spike.zig:79-80)
   Entonces observa filas sucias > 0 antes de clean() y 0 + dirty .false después
   Y el TOTAL de suites de `zig build test` sube exactamente en 1 (una por módulo nuevo)
+
+Escenario: el widget real ejecuta la cadena (enmienda post-auditoría; el núcleo solo no basta)
+  Dado el `TerminalWidget` conectado (realize/resize/ render cableados, no solo existentes)
+  Cuando se alimenta un byte y se retira el `queue_render`
+  Entonces el frame no llega (sabotaje que prueba el eslabón)
+  Y `onResize` deriva rejilla → `Terminal.resize` bajo lock (probado headless llamando al handler)
+  Y el contexto GL del gate (core vs compatibilidad, D4) está decidido por escrito antes de medir
 ```
 
 ## Obligaciones del ledger que este diseño contrae (toda fila vigente que toca el issue deja rastro; f88/f92)
@@ -130,6 +145,14 @@ Escenario: zig build test alimenta SGR + texto y comprueba sucias antes/después
 - Territorio disjunto + ledgers append-only con rebase avisado (f37/f61/f74/f81); rastro: `git status/diff`.
 
 ## Riesgos y preguntas abiertas
+
+- **D4 (bloquea el gate del criterio 2):** el renderer usa modo inmediato GL (`glBegin`/texturas
+  fijas). Si el `GtkGLArea` entrega contexto core, cada llamada da `GL_INVALID_OPERATION` y el gate
+  mediría un `glClear`. El perfil se decide por escrito (docs + log de `GL_VERSION` en el harness)
+  ANTES de medir; si es core, el modo inmediato se sustituye antes del gate, no durante.
+- **La cadena se prueba conectada, no existente (f108):** `onResize`/`onRealize`/`render` se
+  verifican por sus call sites/conexiones (`grep` de conexiones), nunca leyendo la función. B2 nos
+  enseñó que una función perfecta sin conectar es código muerto con tests en verde.
 
 - **El renderer GL no tiene número propio todavía** (#7: solo se probó contexto + clear). Si el
   criterio 2 falla su umbral se invoca la escalera de aborto del spike, no se baja el umbral.
