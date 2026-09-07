@@ -21,6 +21,11 @@ io: std.Io = undefined,
 is_window_active: ?*const fn (?*anyopaque) bool = null,
 is_window_active_data: ?*anyopaque = null,
 
+/// Protects `notifs` from concurrent access: the UI thread inserts/removes
+/// via sendNotification/dismiss, while spawned detached threads update the
+/// map after process.run completes.
+map_mutex: std.atomic.Mutex = .unlocked,
+
 /// Tracks the last notification id per (device_id, pane_id) so a second
 /// notification for the same agent replaces the toast instead of stacking.
 /// Also stores the headline used, so `dismiss` can reconstruct it.
@@ -81,8 +86,20 @@ fn ensureMapInited(self: *Notify) void {
     self.notifs = NotifyMap.initContext(self.gpa, .{});
 }
 
+/// Blocks until the map mutex is acquired. The critical sections are tiny
+/// (HashMap operations), so a spin-wait is appropriate.
+fn lockMap(self: *Notify) void {
+    while (!self.map_mutex.tryLock()) std.atomic.spinLoopHint();
+}
+
 pub fn deinit(self: *Notify) void {
     if (!self.notifs_inited) return;
+    // A spawned thread may still be updating the map. If we can't acquire
+    // the lock, the thread will free its own copies and release the lock;
+    // we skip map cleanup to avoid use-after-free (the process is shutting
+    // down anyway — the3s process.run timeout bounds the wait).
+    if (!self.map_mutex.tryLock()) return;
+    defer self.map_mutex.unlock();
     var it = self.notifs.iterator();
     while (it.next()) |entry| {
         self.gpa.free(entry.key_ptr.device_id);
@@ -147,101 +164,161 @@ fn sendNotification(
     const agent_name = agentName(agent);
     const title = agent.displayTitle();
     const headline = try std.fmt.allocPrint(self.gpa, "{s} · {s}", .{ title, agent_name });
-    // Bug 2 fix: headline is allocated above but can leak if any subsequent
-    // try (buildArgv, spawn, wait, getOrPut) propagates an error.  errdefer
-    // frees it on error; ownership transfers to the map on the happy path
-    // (gop.value_ptr.headline = headline), so we cancel the errdefer by
-    // NOT freeing headline there — same pattern as Store.applySnapshot's
-    // per-field errdefer (Store.zig:210-230).
     errdefer self.gpa.free(headline);
 
-    // Bug 1 fix: dupe device_id/pane_id so the NotifyMap key owns its slices.
-    // The Store's Agent fields are aliased from AgentKey (Store.zig:868) and
-    // freed when the Store drops the agent — our map must outlive that.
     const key_device = try self.gpa.dupe(u8, agent.device_id);
     errdefer self.gpa.free(key_device);
     const key_pane = try self.gpa.dupe(u8, agent.pane_id);
     errdefer self.gpa.free(key_pane);
 
-    const key = NotifyKey{
-        .device_id = key_device,
-        .pane_id = key_pane,
-    };
-
-    // Look up previous notification id for this agent (for -r replacement).
-    // Use the original slices for the read-only lookup (they're still valid
-    // here; the Store hasn't freed the agent yet during onTransitionFn).
-    const lookup_key = NotifyKey{
-        .device_id = agent.device_id,
-        .pane_id = agent.pane_id,
-    };
-    const replaces_id: ?u32 = if (self.notifs.get(lookup_key)) |entry| entry.id else null;
-
-    // Blocker 4 fix: dupe agent_name BEFORE getOrPut so the literal that
-    // writes into the map entry has no falible try/dupe inside it.
     const agent_name_dup = try self.gpa.dupe(u8, agent_name);
     errdefer self.gpa.free(agent_name_dup);
 
-    const argv_result = try buildArgv(
-        self.gpa,
-        agent,
-        urgency,
-        glyph,
-        headline,
-        replaces_id,
-    );
-    defer argv_result.deinit(self.gpa);
+    const workspace_id = try self.gpa.dupe(u8, agent.workspace_id);
+    errdefer self.gpa.free(workspace_id);
 
-    // Blockers 2+3: use std.process.run (captures stdout correctly via pipe,
-    // unlike readPositionalAll on a pipe which fails with error.Unseekable)
-    // with a 3-second timeout so a hung D-Bus never freezes the UI thread.
-    const run_result = std.process.run(self.gpa, self.io, .{
+    // All data is now heap-owned by the caller. Spawn a detached thread that
+    // does the blocking process.run + map update, keeping the GTK main loop
+    // unblocked.
+    const args = try self.gpa.create(SendThreadArgs);
+    args.* = .{
+        .gpa = self.gpa,
+        .io = self.io,
+        .notify = self,
+        .key_device = key_device,
+        .key_pane = key_pane,
+        .workspace_id = workspace_id,
+        .headline = headline,
+        .agent_name = agent_name_dup,
+        .urgency = urgency,
+        .glyph = glyph,
+    };
+
+    const thread = std.Thread.spawn(.{}, sendThread, .{args}) catch |err| {
+        std.log.err("Notify: failed to spawn send thread: {t}", .{err});
+        self.gpa.free(headline);
+        self.gpa.free(key_device);
+        self.gpa.free(key_pane);
+        self.gpa.free(workspace_id);
+        self.gpa.free(agent_name_dup);
+        self.gpa.destroy(args);
+        return;
+    };
+    thread.detach();
+}
+
+const SendThreadArgs = struct {
+    gpa: std.mem.Allocator,
+    io: std.Io,
+    notify: *Notify,
+    key_device: []const u8,
+    key_pane: []const u8,
+    workspace_id: []const u8,
+    headline: []const u8,
+    agent_name: []const u8,
+    urgency: Urgency,
+    glyph: []const u8,
+};
+
+/// Runs in a detached thread: builds the argv, calls omarchy-notification-send,
+/// parses the notification id, and updates the map. Owns all heap data in
+/// `args` and frees it on exit (including `args` itself).
+fn sendThread(raw: *SendThreadArgs) void {
+    const args = raw;
+    defer args.gpa.destroy(args);
+
+    const lookup_key = NotifyKey{
+        .device_id = args.key_device,
+        .pane_id = args.key_pane,
+    };
+    const replaces_id: ?u32 = blk: {
+        args.notify.lockMap();
+        defer args.notify.map_mutex.unlock();
+        break :blk if (args.notify.notifs.get(lookup_key)) |entry| entry.id else null;
+    };
+
+    const argv_result = buildArgvFromFields(
+        args.gpa,
+        args.key_device,
+        args.key_pane,
+        args.agent_name,
+        args.workspace_id,
+        args.urgency,
+        args.glyph,
+        args.headline,
+        replaces_id,
+    ) catch |err| {
+        std.log.err("Notify: buildArgv failed in thread: {t}", .{err});
+        args.gpa.free(args.headline);
+        args.gpa.free(args.key_device);
+        args.gpa.free(args.key_pane);
+        args.gpa.free(args.workspace_id);
+        args.gpa.free(args.agent_name);
+        return;
+    };
+    defer argv_result.deinit(args.gpa);
+
+    const run_result = std.process.run(args.gpa, args.io, .{
         .argv = argv_result.argv,
         .timeout = .{ .duration = .{ .raw = .fromSeconds(3), .clock = .awake } },
     }) catch |err| {
         std.log.warn("Notify: omarchy-notification-send failed: {t}", .{err});
-        // return de exito: errdefer no dispara aqui, free explicito
-        self.gpa.free(headline);
-        self.gpa.free(key_device);
-        self.gpa.free(key_pane);
-        self.gpa.free(agent_name_dup);
+        args.gpa.free(args.headline);
+        args.gpa.free(args.key_device);
+        args.gpa.free(args.key_pane);
+        args.gpa.free(args.workspace_id);
+        args.gpa.free(args.agent_name);
         return;
     };
-    defer self.gpa.free(run_result.stdout);
-    defer self.gpa.free(run_result.stderr);
+    defer args.gpa.free(run_result.stdout);
+    defer args.gpa.free(run_result.stderr);
 
     if (run_result.term != .exited or run_result.term.exited != 0) {
         std.log.warn("Notify: omarchy-notification-send exited with {}", .{run_result.term});
     }
 
-    // Parse the notification id and store it.
     const notif_id = parseNotificationId(run_result.stdout) orelse {
         std.log.warn("Notify: could not parse notification id from stdout: {s}", .{run_result.stdout});
-        // return de exito: errdefer no dispara aqui, free explicito
-        self.gpa.free(headline);
-        self.gpa.free(key_device);
-        self.gpa.free(key_pane);
-        self.gpa.free(agent_name_dup);
+        args.gpa.free(args.headline);
+        args.gpa.free(args.key_device);
+        args.gpa.free(args.key_pane);
+        args.gpa.free(args.workspace_id);
+        args.gpa.free(args.agent_name);
         return;
     };
 
-    // Update or insert the notification entry.
-    const gop = try self.notifs.getOrPut(key);
+    const key = NotifyKey{
+        .device_id = args.key_device,
+        .pane_id = args.key_pane,
+    };
+
+    args.notify.lockMap();
+    defer args.notify.map_mutex.unlock();
+
+    const gop = args.notify.notifs.getOrPut(key) catch |err| {
+        std.log.err("Notify: map getOrPut failed: {t}", .{err});
+        args.gpa.free(args.headline);
+        args.gpa.free(args.key_device);
+        args.gpa.free(args.key_pane);
+        args.gpa.free(args.workspace_id);
+        args.gpa.free(args.agent_name);
+        return;
+    };
     if (gop.found_existing) {
-        // The key we just built is a duplicate — free it; the existing entry
-        // already owns its key slices.
-        self.gpa.free(key_device);
-        self.gpa.free(key_pane);
-        self.gpa.free(gop.value_ptr.headline);
-        self.gpa.free(gop.value_ptr.agent_name);
+        args.gpa.free(args.key_device);
+        args.gpa.free(args.key_pane);
+        args.gpa.free(gop.value_ptr.headline);
+        args.gpa.free(gop.value_ptr.agent_name);
     }
-    // Ownership transfers: headline → map, key_device/key_pane → map key,
-    // agent_name_dup → map entry.  The errdefers are cancelled by the
-    // function returning successfully — they only fire on error paths.
+    // workspace_id is not stored in the map — free it now.
+    args.gpa.free(args.workspace_id);
+    // Ownership transfers: headline → map, agent_name → map entry.
+    // key_device/key_pane are either freed above (found_existing) or
+    // consumed by the new map key (getOrPut).
     gop.value_ptr.* = .{
         .id = notif_id,
-        .headline = headline,
-        .agent_name = agent_name_dup,
+        .headline = args.headline,
+        .agent_name = args.agent_name,
     };
 }
 
@@ -249,29 +326,75 @@ fn sendNotification(
 pub fn dismiss(self: *Notify, device_id: []const u8, pane_id: []const u8) void {
     self.ensureMapInited();
 
-    const key = NotifyKey{ .device_id = device_id, .pane_id = pane_id };
-    const entry = self.notifs.get(key) orelse return;
+    // Resolve the headline under the lock, dupe it, remove the entry — then
+    // spawn a detached thread for the blocking process.run.
+    const headline_dup = blk: {
+        self.lockMap();
+        defer self.map_mutex.unlock();
 
-    // entry.headline is already "title · agent_name" (set in sendNotification).
-    const argv = [_][]const u8{ notif_dismiss_bin, entry.headline };
+        const key = NotifyKey{ .device_id = device_id, .pane_id = pane_id };
+        const entry = self.notifs.get(key) orelse return;
+        const hd = self.gpa.dupe(u8, entry.headline) catch |err| {
+            std.log.err("Notify: dupe headline for dismiss failed: {t}", .{err});
+            return;
+        };
+        // Remove from the map now — the thread will handle process.run.
+        if (self.notifs.fetchRemove(key)) |removed| {
+            self.gpa.free(removed.key.device_id);
+            self.gpa.free(removed.key.pane_id);
+            self.gpa.free(removed.value.headline);
+            self.gpa.free(removed.value.agent_name);
+        }
+        break :blk hd;
+    };
 
-    // Blockers 2+3: std.process.run with 3s timeout, same as sendNotification.
-    const run_result = std.process.run(self.gpa, self.io, .{
+    const args = self.gpa.create(DismissThreadArgs) catch |err| {
+        std.log.err("Notify: alloc DismissThreadArgs failed: {t}", .{err});
+        self.gpa.free(headline_dup);
+        return;
+    };
+    args.* = .{
+        .gpa = self.gpa,
+        .io = self.io,
+        .headline = headline_dup,
+    };
+
+    const thread = std.Thread.spawn(.{}, dismissThread, .{args}) catch |err| {
+        std.log.err("Notify: failed to spawn dismiss thread: {t}", .{err});
+        self.gpa.free(headline_dup);
+        self.gpa.destroy(args);
+        return;
+    };
+    thread.detach();
+}
+
+const DismissThreadArgs = struct {
+    gpa: std.mem.Allocator,
+    io: std.Io,
+    headline: []const u8,
+};
+
+/// Runs in a detached thread: calls omarchy-notification-dismiss with a 3s
+/// timeout. Owns `args.headline` and frees it on exit.
+fn dismissThread(raw: *DismissThreadArgs) void {
+    const args = raw;
+    defer args.gpa.destroy(args);
+    defer args.gpa.free(args.headline);
+
+    const argv = [_][]const u8{ notif_dismiss_bin, args.headline };
+
+    const run_result = std.process.run(args.gpa, args.io, .{
         .argv = &argv,
         .timeout = .{ .duration = .{ .raw = .fromSeconds(3), .clock = .awake } },
     }) catch |err| {
         std.log.err("Notify: dismiss failed: {t}", .{err});
         return;
     };
-    defer self.gpa.free(run_result.stdout);
-    defer self.gpa.free(run_result.stderr);
+    defer args.gpa.free(run_result.stdout);
+    defer args.gpa.free(run_result.stderr);
 
-    // Remove from the map.
-    if (self.notifs.fetchRemove(key)) |removed| {
-        self.gpa.free(removed.key.device_id);
-        self.gpa.free(removed.key.pane_id);
-        self.gpa.free(removed.value.headline);
-        self.gpa.free(removed.value.agent_name);
+    if (run_result.term != .exited or run_result.term.exited != 0) {
+        std.log.warn("Notify: omarchy-notification-dismiss exited with {}", .{run_result.term});
     }
 }
 
@@ -313,22 +436,47 @@ fn buildArgv(
     headline: []const u8,
     replaces_id: ?u32,
 ) !ArgvResult {
-    const agent_name = agentName(agent);
+    return buildArgvFromFields(
+        gpa,
+        agent.device_id,
+        agent.pane_id,
+        agentName(agent),
+        agent.workspace_id,
+        urgency,
+        glyph,
+        headline,
+        replaces_id,
+    );
+}
+
+/// Core argv builder — takes individual field slices so callers that own
+/// copies (detached threads) don't need an Agent pointer.
+fn buildArgvFromFields(
+    gpa: std.mem.Allocator,
+    device_id: []const u8,
+    pane_id: []const u8,
+    agent_name: []const u8,
+    workspace_id: []const u8,
+    urgency: Urgency,
+    glyph: []const u8,
+    headline: []const u8,
+    replaces_id: ?u32,
+) !ArgvResult {
     const urgency_str: []const u8 = switch (urgency) {
         .critical => "critical",
         .normal => "normal",
     };
     const body = switch (urgency) {
         .critical => try std.fmt.allocPrint(gpa, "{s} needs your input · {s} · {s}", .{
-            agent_name, agent.workspace_id, agent.device_id,
+            agent_name, workspace_id, device_id,
         }),
         .normal => try std.fmt.allocPrint(gpa, "{s} finished · {s} · {s}", .{
-            agent_name, agent.workspace_id, agent.device_id,
+            agent_name, workspace_id, device_id,
         }),
     };
 
     const exec_target = try std.fmt.allocPrint(gpa, "{s}/{s}", .{
-        agent.device_id, agent.pane_id,
+        device_id, pane_id,
     });
 
     // Count argv elements.
