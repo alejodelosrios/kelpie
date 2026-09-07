@@ -89,13 +89,7 @@ pub const TerminalView = struct {
         self.mutex.unlock(self.io);
 
         // 2. Contar filas sucias (sin lock — solo lectura de row_data).
-        const row_data = self.render_state.row_data.slice();
-        const dirty_flags = row_data.items(.dirty);
-        var dirty_count: usize = 0;
-        for (dirty_flags) |d| {
-            if (d) dirty_count += 1;
-        }
-        self.rows_uploaded_last_frame = dirty_count;
+        self.rows_uploaded_last_frame = self.countDirtyRows();
 
         // 3. endUpdate (denormaliza pending_styles, sin lock).
         self.render_state.endUpdate();
@@ -116,6 +110,19 @@ pub const TerminalView = struct {
         // 5. clean() — marca todo como consumido.
         self.render_state.clean();
         self.frame_count += 1;
+    }
+
+    /// Cuenta filas sucias en el RenderState (criterio 1: el contador que el
+    /// frame reporta). Sin GL: solo lee row_data. Se extrae de renderFrame para
+    /// que QA la pruebe headless sin contexto GL.
+    pub fn countDirtyRows(self: *Self) usize {
+        const row_data = self.render_state.row_data.slice();
+        const dirty_flags = row_data.items(.dirty);
+        var dirty_count: usize = 0;
+        for (dirty_flags) |d| {
+            if (d) dirty_count += 1;
+        }
+        return dirty_count;
     }
 
     /// Redimensiona la rejilla del terminal. El RenderState pasa a .full en
@@ -232,4 +239,133 @@ test "resizeGrid cambia dimensiones" {
     try tv.resizeGrid(alloc, 120, 40);
     try std.testing.expectEqual(@as(u16, 120), tv.cols());
     try std.testing.expectEqual(@as(u16, 40), tv.rows());
+}
+
+test "escenario 1: contador sube 1 fila tras feed de una linea; 24 tras full" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+
+    var tv = try TerminalView.init(io, alloc, 80, 24);
+    defer tv.deinit(alloc);
+
+    // Primer beginUpdate: .full por el resize inicial → 24 filas sucias.
+    try tv.render_state.beginUpdate(alloc, &tv.terminal);
+    tv.render_state.endUpdate();
+    try std.testing.expectEqual(.full, tv.render_state.dirty);
+    try std.testing.expectEqual(@as(usize, 24), tv.countDirtyRows());
+    tv.render_state.clean();
+    try std.testing.expectEqual(@as(usize, 0), tv.countDirtyRows());
+
+    // Alimentar texto que ensucia exactamente 1 fila (una sola linea, sin wrap).
+    try tv.feed("Hello, Kelpie!");
+    try tv.render_state.beginUpdate(alloc, &tv.terminal);
+    try std.testing.expectEqual(.partial, tv.render_state.dirty);
+    try std.testing.expectEqual(@as(usize, 1), tv.countDirtyRows());
+    tv.render_state.endUpdate();
+    tv.render_state.clean();
+
+    // Forzar estado .full redimensionando (Terminal.resize invalida el
+    // RenderState; setear dirty=.full a mano no marca las filas). Primero
+    // salimos de la rejilla 80x24 y luego volvemos: el segundo resize
+    // invalida de nuevo y el siguiente frame sube las 24.
+    try tv.resizeGrid(alloc, 80, 30);
+    try tv.render_state.beginUpdate(alloc, &tv.terminal);
+    try std.testing.expectEqual(.full, tv.render_state.dirty);
+    tv.render_state.endUpdate();
+    tv.render_state.clean();
+
+    try tv.resizeGrid(alloc, 80, 24);
+    try tv.render_state.beginUpdate(alloc, &tv.terminal);
+    try std.testing.expectEqual(.full, tv.render_state.dirty);
+    try std.testing.expectEqual(@as(usize, 24), tv.countDirtyRows());
+    tv.render_state.endUpdate();
+}
+
+test "escenario 4 headless: resizeGrid pasa el RenderState a .full" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+
+    var tv = try TerminalView.init(io, alloc, 80, 24);
+    defer tv.deinit(alloc);
+
+    // Consumir el .full inicial.
+    try tv.render_state.beginUpdate(alloc, &tv.terminal);
+    tv.render_state.endUpdate();
+    tv.render_state.clean();
+    try std.testing.expectEqual(@as(usize, 0), tv.countDirtyRows());
+
+    // Redimensionar: el próximo beginUpdate debe ver .full (rejilla inválida).
+    try tv.resizeGrid(alloc, 120, 40);
+    try std.testing.expectEqual(@as(u16, 120), tv.cols());
+    try std.testing.expectEqual(@as(u16, 40), tv.rows());
+    try tv.render_state.beginUpdate(alloc, &tv.terminal);
+    try std.testing.expectEqual(.full, tv.render_state.dirty);
+    try std.testing.expectEqual(@as(usize, 40), tv.countDirtyRows());
+    tv.render_state.endUpdate();
+}
+
+test "feed concurrente desde N hilos: cada linea unica llega intacta a su fila" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+
+    var tv = try TerminalView.init(io, alloc, 80, 24);
+    defer tv.deinit(alloc);
+
+    // Consumir el .full inicial: sin esto un feed roto (que no alimenta) no
+    // se distinguiría de un terminal recién iniciado.
+    try tv.render_state.beginUpdate(alloc, &tv.terminal);
+    tv.render_state.endUpdate();
+    tv.render_state.clean();
+    try std.testing.expectEqual(@as(usize, 0), tv.countDirtyRows());
+
+    const thread_count: usize = 4;
+    var threads: [thread_count]std.Thread = undefined;
+
+    // Cada hilo posiciona el cursor en su fila (CSI <fila>;1H) y escribe una
+    // marca única e indivisible (sin \r\n). Sin el mutex, las secuencias CSI
+    // de hilos distintos se entrelazan y las marcas acaban corruptas o en la
+    // fila equivocada — el grid final lo delata.
+    const Worker = struct {
+        fn run(view: *TerminalView, row: usize) void {
+            var buf: [64]u8 = undefined;
+            const seq = std.fmt.bufPrint(&buf, "\x1b[{d};1HQA_MARK_{d}_END", .{ row + 1, row }) catch return;
+            var attempt: usize = 0;
+            while (attempt < 50) : (attempt += 1) {
+                view.feed(seq) catch return;
+            }
+        }
+    };
+
+    for (&threads, 0..) |*th, i| {
+        th.* = try std.Thread.spawn(.{}, Worker.run, .{ &tv, i });
+    }
+    for (&threads) |*th| th.join();
+
+    // La rejilla sigue válida y el RenderState puede denormalizarse sin pánico.
+    try std.testing.expectEqual(@as(u16, 80), tv.cols());
+    try std.testing.expectEqual(@as(u16, 24), tv.rows());
+    try tv.render_state.beginUpdate(alloc, &tv.terminal);
+    tv.render_state.endUpdate();
+
+    // Cada fila i debe contener la marca completa del hilo i: leer las celdas
+    // de la fila como cadena y buscar "QA_MARK_{i}_END".
+    const row_data = tv.render_state.row_data.slice();
+    const cells_all = row_data.items(.cells);
+    for (0..thread_count) |i| {
+        var line_buf: [160]u8 = undefined;
+        var len: usize = 0;
+        const row_cells = cells_all[i];
+        var col: usize = 0;
+        while (col < row_cells.len and len < line_buf.len) : (col += 1) {
+            const cp = row_cells.get(col).raw.codepoint();
+            if (cp == 0) continue;
+            const n = std.unicode.utf8Encode(@intCast(cp), line_buf[len..]) catch break;
+            len += n;
+        }
+        const line = line_buf[0..len];
+        var needle_buf: [64]u8 = undefined;
+        const needle = std.fmt.bufPrint(&needle_buf, "QA_MARK_{d}_END", .{i}) catch return error.TestUnexpectedResult;
+        try std.testing.expect(std.mem.indexOf(u8, line, needle) != null);
+    }
+    tv.render_state.clean();
 }
