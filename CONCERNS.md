@@ -555,3 +555,16 @@ Formato: `- [YYYY-MM-DD] #issue — qué se vio · por qué no se arregló ahora
   es `fork`+`exec` de bash → `jq` → `busctl` → D-Bus; tras `cad931c` ya no bloquea la UI, pero el
   coste existe y `applySnapshot:305-312` dispara en bucle si varios agentes transicionan en el
   mismo snapshot · medir el típico en el gate Wayland del criterio 1 antes de darlo por gratis.
+
+- **`lockMap` de Notify gira sin cota ni cesión** (auditoría #18 v2, no bloqueante) · si un hilo
+  detached muriera en panic con el lock tomado, la UI giraría al 100 % para siempre: se cambió un
+  freeze acotado de 3 s por uno potencialmente eterno en un escenario menos probable · los holds
+  son diminutos y ninguno falla salvo `getOrPut` (puede asignar y crecer el mapa), así que la
+  probabilidad es baja · mitigación si algún día muerde: contador de giros + degradar a
+  `std.Thread.yield`.
+
+- **Un hilo del SO por transición, sin techo** (auditoría #18 v2, no bloqueante; mutación de la
+  preocupación 4 de v1) · `applySnapshot:305-312` dispara en bucle: N agentes que transicionan en
+  el mismo snapshot = N `Thread.spawn` + N `fork`/`exec` simultáneos · acotado por número de
+  agentes (pequeño hoy) · tras `cad931c` ya no bloquea la UI, pero el coste se movió, no
+  desapareció · medirlo en el gate Wayland del criterio 1.
