@@ -507,6 +507,10 @@ Formato: `- [YYYY-MM-DD] #issue — qué se vio · por qué no se arregló ahora
   3s sí acota el bloqueo (verificado: `process.zig:510` arma `defer child.kill(io)`), así que el
   riesgo es real pero medido, no el argumento que el diseño da para aceptarlo. Corregir la frase del
   contrato si #18 se retoma, no el código.
+  · **Nota PM 2026-09-07 (#18 v2): ⚠️ corregido en el diseño v2 y superado en el código — el
+  diseño dice hoy «corre en el hilo de UI» (§Riesgos) y `cad931c` saca el `run` a hilo
+  detached con mutex. El orquestador reabrió el gate por esto mismo: un timeout acota el
+  freeze, no lo evita, y el comentario de `Notify.zig:197` era falso.**
 
 - **`omarchy-notification-dismiss` retira por substring sobre TODAS las notificaciones del sistema**,
   no solo las de kelpie (`omarchy-shell -q notifications dismiss "$1"`, verificado en la máquina) ·
@@ -527,3 +531,27 @@ Formato: `- [YYYY-MM-DD] #issue — qué se vio · por qué no se arregló ahora
   · **Nota PM 2026-09-07 (#18 v2): ⚠️ SUPERADA — #93 (`b4ce64d`) hace que `applySnapshot`
   derive transiciones (`src/model/Store.zig:305-312`); la cadena vuelve a ser alcanzable.
   Se conserva la fila como historia del bloqueo.**
+
+- **Un `displayTitle()` que empiece por un flag reconocido se come el argv** (auditoría #18 v1,
+  no bloqueante) · el primer bucle de opciones de `omarchy-notification-send` (`:85-91` →
+  `parse_omarchy_option:30-52`) corre antes de `headline=$1` (`:98`), así que un título literal
+  `-u` consume el body como valor de urgencia y el script muere en `:144-146` (`exit 1`, sin
+  toast) · aplica a `-g -u -i -t -r -p --app-name --image --icon` y `--flag=valor` · NO es
+  inyección (el dato viaja como argv, jamás por shell) pero el headline es dato influenciable
+  por el agente en posición de opción, y el test de inyección solo prueba `$(...)` · consecuencia:
+  una toast perdida y un `log.warn` · el arreglo limpio (`--` terminador) es territorio de
+  Omarchy, no de este issue.
+
+- **El `timeout` de 3 s de `std.process.run` es por llamada a `fill()`, no un presupuesto total**
+  (auditoría #18 v1, no bloqueante) · `process.zig:520` pasa un `.duration` relativo dentro del
+  bucle: un hijo que gotea salida más lento que 3 s por trozo nunca se corta · irrelevante para
+  la línea única de `busctl -p`, relevante si algo escribe más por ese stdout algún día.
+
+- **`notify` no se `deinit`-ea nunca** (auditoría #18 v1, no bloqueante) · crecimiento acotado por
+  número de panes distintos notificados y no dismisseados (tres slices cortas por pane) · mismo
+  patrón de vida-de-proceso que `theme_watcher`, consistente con el repo, no desviación.
+
+- **Coste del spawn por toast, sin medir el típico** (auditoría #18 v1, no bloqueante) · cada toast
+  es `fork`+`exec` de bash → `jq` → `busctl` → D-Bus; tras `cad931c` ya no bloquea la UI, pero el
+  coste existe y `applySnapshot:305-312` dispara en bucle si varios agentes transicionan en el
+  mismo snapshot · medir el típico en el gate Wayland del criterio 1 antes de darlo por gratis.
