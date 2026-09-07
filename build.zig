@@ -139,4 +139,40 @@ pub fn build(b: *std.Build) void {
     terminal_view_mod.linkSystemLibrary("GL", .{});
     const terminal_view_tests = b.addTest(.{ .root_module = terminal_view_mod });
     test_step.dependOn(&b.addRunArtifact(terminal_view_tests).step);
+
+    // TerminalWidget (#21): GObject GLArea — tests headless (onResize, feed).
+    // Needs ghostty-vt + all gobject imports + GL, same as exe_mod.
+    const terminal_widget_mod = b.createModule(.{
+        .root_source_file = b.path("src/terminal/TerminalWidget.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    if (b.lazyDependency("ghostty", .{})) |dep| {
+        terminal_widget_mod.addImport("ghostty-vt", dep.module("ghostty-vt"));
+    }
+    if (b.lazyDependency("gobject", .{ .target = target, .optimize = optimize })) |gobject| {
+        const gobject_imports = .{
+            .{ "adw", "adw1" },
+            .{ "gdk", "gdk4" },
+            .{ "gdkwayland", "gdkwayland4" },
+            .{ "gio", "gio2" },
+            .{ "glib", "glib2" },
+            .{ "glibunix", "glibunix2" },
+            .{ "gobject", "gobject2" },
+            .{ "gtk", "gtk4" },
+            .{ "gsk", "gsk4" },
+            .{ "graphene", "graphene1" },
+            .{ "pango", "pango1" },
+            .{ "pangocairo", "pangocairo1" },
+            .{ "cairo", "cairo1" },
+            .{ "xlib", "xlib2" },
+        };
+        inline for (gobject_imports) |import| {
+            const name, const module = import;
+            terminal_widget_mod.addImport(name, gobject.module(module));
+        }
+    }
+    terminal_widget_mod.linkSystemLibrary("GL", .{});
+    const terminal_widget_tests = b.addTest(.{ .root_module = terminal_widget_mod });
+    test_step.dependOn(&b.addRunArtifact(terminal_widget_tests).step);
 }
