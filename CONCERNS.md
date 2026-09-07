@@ -568,3 +568,19 @@ Formato: `- [YYYY-MM-DD] #issue — qué se vio · por qué no se arregló ahora
   el mismo snapshot = N `Thread.spawn` + N `fork`/`exec` simultáneos · acotado por número de
   agentes (pequeño hoy) · tras `cad931c` ya no bloquea la UI, pero el coste se movió, no
   desapareció · medirlo en el gate Wayland del criterio 1.
+
+- [2026-09-07] #21 — `TerminalWidget` guarda `alloc`/`io` en variables de módulo (`widget_alloc`,
+  `widget_io` en `src/terminal/TerminalWidget.zig`): `Allocator` e `Io` no son tipos `extern` y no
+  pueden vivir en el `extern struct` del widget · limita a UNA instancia de TerminalWidget por
+  proceso, suficiente para el harness y la ventana única de M2 · dispara cuando un consumidor
+  necesite dos terminales visibles (split/panes): hay que mover alloc/io a un registro externo
+  indexado por puntero de widget.
+- [2026-09-07] #21 — `drawRowTexture` crea y destruye una textura GL por fila sucia y por frame
+  (`glGenTextures`/`glDeleteTextures` en el camino caliente) en vez de un atlas persistente · se
+  aceptó porque el criterio 2 (≥ 60 fps en 200×60) es quien juzga, con el número medido en el gate
+  conjunto, no con razonamiento · dispara si el gate mide < 60 fps: el atlas es el primer sospechoso.
+- [2026-09-07] #21 — el test flaky `herdr.LocalServer ensureRunning` (errno 111, ~50% de los runs,
+  ya documentado arriba como tercera medición) volvió a fallar 2 de 5 runs de este ciclo con el
+  árbol de #21 intacto entre runs · no lo toca este issue (territorio `src/herdr/`, lease ajeno) y
+  amenaza con pintar de rojo el CI del PR al azar · dispara al abrir el PR: si CI sale rojo por este
+  test, re-run + enlace a esta entrada, no arreglo dentro de #21.

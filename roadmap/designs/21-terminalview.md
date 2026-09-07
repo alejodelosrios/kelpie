@@ -1,8 +1,13 @@
 # Diseño — #21 TerminalView: widget GTK4 que dibuja solo filas sucias del RenderState con GtkGLArea + renderer GL propio
 
-> Aprobado por: pendiente
+> Aprobado por: orquestador (wA:p1, fleet ola M2, gates=scope,diseño) · 2026-09-07
 >
 > Rama `feature/21-terminalview`. Risk:high; cuello de botella de M2 (#22–#27 dependen de este contrato).
+>
+> Nota de Apply (2026-09-07): verificado contra el ADR en la fuente por el orquestador, no solo
+> en este reporte. Desvíos aceptados del cuerpo del issue: observable del criterio 1 pasa de
+> "nodo GSK reconstruido" a "fila subida al atlas"; `Terminal.resize` lleva struct `Resize`;
+> sub-caso `stty` del criterio 4 PENDIENTE hasta el PTY de #23.
 
 ## Spec
 

@@ -123,4 +123,20 @@ pub fn build(b: *std.Build) void {
     });
     const attach_tests = b.addTest(.{ .root_module = attach_mod });
     test_step.dependOn(&b.addRunArtifact(attach_tests).step);
+
+    // TerminalView (#21): widget GLArea con Terminal + RenderState bajo mutex.
+    // Mismo patrón que theme_css_mod — módulo propio. Necesita ghostty-vt (como
+    // vt_spike_mod) y GL (ya enlazado en exe_mod, aquí lo enlazamos en el módulo
+    // de test para que las pruebas de renderFrame compilen).
+    const terminal_view_mod = b.createModule(.{
+        .root_source_file = b.path("src/terminal/TerminalView.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    if (b.lazyDependency("ghostty", .{})) |dep| {
+        terminal_view_mod.addImport("ghostty-vt", dep.module("ghostty-vt"));
+    }
+    terminal_view_mod.linkSystemLibrary("GL", .{});
+    const terminal_view_tests = b.addTest(.{ .root_module = terminal_view_mod });
+    test_step.dependOn(&b.addRunArtifact(terminal_view_tests).step);
 }
