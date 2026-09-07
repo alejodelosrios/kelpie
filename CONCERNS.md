@@ -491,3 +491,80 @@ Formato: `- [YYYY-MM-DD] #issue — qué se vio · por qué no se arregló ahora
   el arreglo es mecánico · (2) el call-graph Zig es incompleto: 5 llamadores directos de
   `src/ui/sidebar.zig` (573, 608, 689, 756, 786) existen y no salen en `callers("applySnapshot")` —
   el criterio binario (≥1 real) se cumplió con 4 verificados, pero la herramienta no es exhaustiva.
+
+- **`buildArgv` (`omarchy/Notify.zig:308-379`, #18) no tiene ni un `errdefer`**: 15 `dupe`/`allocPrint`
+  falibles (`body`, `exec_target`, el array `argv` y sus 12-14 elementos) sin ninguno armado · si
+  cualquiera falla por OOM se fugan los anteriores · quinta reincidencia de la familia
+  `#5`/`#8`/`#12`/`#16` del ledger tras la regla que #84 escribió («cada `dupe` lleva su `errdefer`
+  armado antes del siguiente») · fix acotado y ya escrito por la auditoría de #18: `errdefer` tras
+  `body`/`exec_target`, y tras `gpa.alloc(argv, count)` uno que libere `argv[0..i]` + el propio array ·
+  no bloquea #18 (solo OOM), pero se arrastra si #18 se retoma.
+
+- **El diseño de #18 se equivoca sobre qué hilo bloquea `std.process.run`**
+  (`roadmap/designs/18-notificaciones-omarchy.md:95-98`): dice que el bloqueo «no es el hilo de
+  render/PTY que ADR-0001 protege», pero `onEvent`→`applyEvent`→`onStoreTransition` sí corre en el
+  main context de GLib (`ui/herdr_link.zig:39-50`, `idleAddOnce`) — es el hilo de UI. El `.timeout` de
+  3s sí acota el bloqueo (verificado: `process.zig:510` arma `defer child.kill(io)`), así que el
+  riesgo es real pero medido, no el argumento que el diseño da para aceptarlo. Corregir la frase del
+  contrato si #18 se retoma, no el código.
+  · **Nota PM 2026-09-07 (#18 v2): ⚠️ corregido en el diseño v2 y superado en el código — el
+  diseño dice hoy «corre en el hilo de UI» (§Riesgos) y `cad931c` saca el `run` a hilo
+  detached con mutex. El orquestador reabrió el gate por esto mismo: un timeout acota el
+  freeze, no lo evita, y el comentario de `Notify.zig:197` era falso.**
+
+- **`omarchy-notification-dismiss` retira por substring sobre TODAS las notificaciones del sistema**,
+  no solo las de kelpie (`omarchy-shell -q notifications dismiss "$1"`, verificado en la máquina) ·
+  Omarchy no expone dismiss por id numérico · el `entry.id` que #18 guarda por agente solo sirve para
+  `-r`, nunca para un dismiss exacto · limitación del contrato de Omarchy, no del diff · un headline
+  corto de kelpie podría retirar la toast de otra app por coincidencia de substring.
+
+- **`onTransition` sigue siendo código muerto en producción** (reconfirma la fila de arriba sobre el
+  mismo tema, ahora verificado punta a punta para #18): `fireTransition` tiene un único call site en
+  todo `Store.zig` (`:344`, dentro de `pane_agent_status_changed`), ese evento no está en
+  `Events.zig:subscription_types` (`:72-81`) y aunque lo estuviera herdr 0.8.2 no lo emite (medido en
+  #84: 55s sobre agentes reales, 0 eventos). `applySnapshot` —el único camino que sí corre en
+  producción vía el sondeo de 150ms— solo llama `fireChanged`, nunca `fireTransition`. Cualquier
+  feature futuro que se cuelgue de `onTransition` (como intentó #18) necesita primero que
+  `applySnapshot` derive transiciones comparando status viejo/nuevo por agente — trabajo de
+  `core-builder` en `model/Store.zig`, no del consumidor. #18 quedó bloqueado y escalado al humano por
+  esto el 2026-09-03.
+  · **Nota PM 2026-09-07 (#18 v2): ⚠️ SUPERADA — #93 (`b4ce64d`) hace que `applySnapshot`
+  derive transiciones (`src/model/Store.zig:305-312`); la cadena vuelve a ser alcanzable.
+  Se conserva la fila como historia del bloqueo.**
+
+- **Un `displayTitle()` que empiece por un flag reconocido se come el argv** (auditoría #18 v1,
+  no bloqueante) · el primer bucle de opciones de `omarchy-notification-send` (`:85-91` →
+  `parse_omarchy_option:30-52`) corre antes de `headline=$1` (`:98`), así que un título literal
+  `-u` consume el body como valor de urgencia y el script muere en `:144-146` (`exit 1`, sin
+  toast) · aplica a `-g -u -i -t -r -p --app-name --image --icon` y `--flag=valor` · NO es
+  inyección (el dato viaja como argv, jamás por shell) pero el headline es dato influenciable
+  por el agente en posición de opción, y el test de inyección solo prueba `$(...)` · consecuencia:
+  una toast perdida y un `log.warn` · el arreglo limpio (`--` terminador) es territorio de
+  Omarchy, no de este issue.
+
+- **El `timeout` de 3 s de `std.process.run` es por llamada a `fill()`, no un presupuesto total**
+  (auditoría #18 v1, no bloqueante) · `process.zig:520` pasa un `.duration` relativo dentro del
+  bucle: un hijo que gotea salida más lento que 3 s por trozo nunca se corta · irrelevante para
+  la línea única de `busctl -p`, relevante si algo escribe más por ese stdout algún día.
+
+- **`notify` no se `deinit`-ea nunca** (auditoría #18 v1, no bloqueante) · crecimiento acotado por
+  número de panes distintos notificados y no dismisseados (tres slices cortas por pane) · mismo
+  patrón de vida-de-proceso que `theme_watcher`, consistente con el repo, no desviación.
+
+- **Coste del spawn por toast, sin medir el típico** (auditoría #18 v1, no bloqueante) · cada toast
+  es `fork`+`exec` de bash → `jq` → `busctl` → D-Bus; tras `cad931c` ya no bloquea la UI, pero el
+  coste existe y `applySnapshot:305-312` dispara en bucle si varios agentes transicionan en el
+  mismo snapshot · medir el típico en el gate Wayland del criterio 1 antes de darlo por gratis.
+
+- **`lockMap` de Notify gira sin cota ni cesión** (auditoría #18 v2, no bloqueante) · si un hilo
+  detached muriera en panic con el lock tomado, la UI giraría al 100 % para siempre: se cambió un
+  freeze acotado de 3 s por uno potencialmente eterno en un escenario menos probable · los holds
+  son diminutos y ninguno falla salvo `getOrPut` (puede asignar y crecer el mapa), así que la
+  probabilidad es baja · mitigación si algún día muerde: contador de giros + degradar a
+  `std.Thread.yield`.
+
+- **Un hilo del SO por transición, sin techo** (auditoría #18 v2, no bloqueante; mutación de la
+  preocupación 4 de v1) · `applySnapshot:305-312` dispara en bucle: N agentes que transicionan en
+  el mismo snapshot = N `Thread.spawn` + N `fork`/`exec` simultáneos · acotado por número de
+  agentes (pequeño hoy) · tras `cad931c` ya no bloquea la UI, pero el coste se movió, no
+  desapareció · medirlo en el gate Wayland del criterio 1.
