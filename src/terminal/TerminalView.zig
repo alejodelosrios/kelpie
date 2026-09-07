@@ -11,6 +11,7 @@ const ghostty_vt = @import("ghostty-vt");
 
 const Terminal = ghostty_vt.Terminal;
 const RenderState = ghostty_vt.RenderState;
+const Stream = ghostty_vt.TerminalStream;
 
 // Raw GL calls — no gobject binding, linked via build.zig `linkSystemLibrary("GL")`.
 extern "c" fn glClearColor(r: f32, g: f32, b: f32, a: f32) void;
@@ -21,8 +22,10 @@ const gl_color_buffer_bit: c_uint = 0x00004000;
 pub const TerminalView = struct {
     terminal: Terminal,
     render_state: RenderState,
+    stream: Stream,
     mutex: std.Io.Mutex,
     io: std.Io,
+    alloc: std.mem.Allocator,
 
     /// Contador de filas subidas en el frame más reciente (criterio 1).
     rows_uploaded_last_frame: usize = 0,
@@ -39,14 +42,24 @@ pub const TerminalView = struct {
         return Self{
             .terminal = terminal,
             .render_state = .empty,
+            .stream = undefined, // set in initStream after terminal is at final address
             .mutex = .init,
             .io = io,
+            .alloc = alloc,
         };
     }
 
-    pub fn deinit(self: *Self, alloc: std.mem.Allocator) void {
-        self.render_state.deinit(alloc);
-        self.terminal.deinit(alloc);
+    /// Must be called immediately after init. Creates the persistent Stream
+    /// with the terminal at its final address (vtStream captures a pointer
+    /// to the terminal — creating it in init would capture a stack local).
+    pub fn initStream(self: *Self) !void {
+        self.stream = self.terminal.vtStream();
+    }
+
+    pub fn deinit(self: *Self) void {
+        self.stream.deinit();
+        self.render_state.deinit(self.alloc);
+        self.terminal.deinit(self.alloc);
     }
 
     /// Cols actuales de la rejilla del terminal.
@@ -61,16 +74,14 @@ pub const TerminalView = struct {
 
     /// Alimenta bytes al terminal desde el hilo lector.
     ///
-    /// Lock → vtStream → nextSlice → unlock. NO pinta — solo marca filas
-    /// sucias en el terminal. El re-render se dispara aparte (queue_render
-    /// del GLArea, gestionado por el consumidor).
+    /// Lock → nextSlice (stream persistente) → unlock. NO pinta — solo
+    /// marca filas sucias en el terminal. El re-render se dispara aparte
+    /// (queue_render del GLArea, gestionado por el consumidor).
     pub fn feed(self: *Self, bytes: []const u8) !void {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
 
-        var stream = self.terminal.vtStream();
-        defer stream.deinit();
-        stream.nextSlice(bytes);
+        self.stream.nextSlice(bytes);
     }
 
     /// Callback de render para GLArea (hilo UI, contexto GL corriente).
@@ -78,10 +89,10 @@ pub const TerminalView = struct {
     /// Lock → beginUpdate → unlock → subir filas sucias → endUpdate → clean().
     /// beginUpdate denormaliza estilos bajo el lock; endUpdate + clean() se
     /// ejecutan sin lock (solo escriben en memoria propia del RenderState).
-    pub fn renderFrame(self: *Self, alloc: std.mem.Allocator, width: c_int, height: c_int) void {
+    pub fn renderFrame(self: *Self, width: c_int, height: c_int) void {
         // 1. Lock → beginUpdate (denormaliza estilos bajo lock).
         self.mutex.lockUncancelable(self.io);
-        self.render_state.beginUpdate(alloc, &self.terminal) catch |err| {
+        self.render_state.beginUpdate(self.alloc, &self.terminal) catch |err| {
             self.mutex.unlock(self.io);
             std.log.warn("TerminalView: beginUpdate failed: {}", .{err});
             return;
@@ -127,11 +138,11 @@ pub const TerminalView = struct {
 
     /// Redimensiona la rejilla del terminal. El RenderState pasa a .full en
     /// el próximo beginUpdate (la propia Terminal.resize lo invalida).
-    pub fn resizeGrid(self: *Self, alloc: std.mem.Allocator, new_cols: u16, new_rows: u16) !void {
+    pub fn resizeGrid(self: *Self, new_cols: u16, new_rows: u16) !void {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
 
-        try self.terminal.resize(alloc, .{
+        try self.terminal.resize(self.alloc, .{
             .cols = new_cols,
             .rows = new_rows,
         });
@@ -143,7 +154,8 @@ test "feed SGR+texto, dirty antes y después de clean" {
     const io = std.testing.io;
 
     var tv = try TerminalView.init(io, alloc, 80, 24);
-    defer tv.deinit(alloc);
+    try tv.initStream();
+    defer tv.deinit();
 
     // Primer beginUpdate tras init: .full por el resize inicial.
     try tv.render_state.beginUpdate(alloc, &tv.terminal);
@@ -207,7 +219,8 @@ test "clean() deja dirty .false hasta la siguiente escritura" {
     const io = std.testing.io;
 
     var tv = try TerminalView.init(io, alloc, 40, 5);
-    defer tv.deinit(alloc);
+    try tv.initStream();
+    defer tv.deinit();
 
     // Primer update: .full.
     try tv.render_state.beginUpdate(alloc, &tv.terminal);
@@ -234,9 +247,10 @@ test "resizeGrid cambia dimensiones" {
     const io = std.testing.io;
 
     var tv = try TerminalView.init(io, alloc, 80, 24);
-    defer tv.deinit(alloc);
+    try tv.initStream();
+    defer tv.deinit();
 
-    try tv.resizeGrid(alloc, 120, 40);
+    try tv.resizeGrid(120, 40);
     try std.testing.expectEqual(@as(u16, 120), tv.cols());
     try std.testing.expectEqual(@as(u16, 40), tv.rows());
 }
@@ -246,7 +260,8 @@ test "escenario 1: contador sube 1 fila tras feed de una linea; 24 tras full" {
     const io = std.testing.io;
 
     var tv = try TerminalView.init(io, alloc, 80, 24);
-    defer tv.deinit(alloc);
+    try tv.initStream();
+    defer tv.deinit();
 
     // Primer beginUpdate: .full por el resize inicial → 24 filas sucias.
     try tv.render_state.beginUpdate(alloc, &tv.terminal);
@@ -268,13 +283,13 @@ test "escenario 1: contador sube 1 fila tras feed de una linea; 24 tras full" {
     // RenderState; setear dirty=.full a mano no marca las filas). Primero
     // salimos de la rejilla 80x24 y luego volvemos: el segundo resize
     // invalida de nuevo y el siguiente frame sube las 24.
-    try tv.resizeGrid(alloc, 80, 30);
+    try tv.resizeGrid(80, 30);
     try tv.render_state.beginUpdate(alloc, &tv.terminal);
     try std.testing.expectEqual(.full, tv.render_state.dirty);
     tv.render_state.endUpdate();
     tv.render_state.clean();
 
-    try tv.resizeGrid(alloc, 80, 24);
+    try tv.resizeGrid(80, 24);
     try tv.render_state.beginUpdate(alloc, &tv.terminal);
     try std.testing.expectEqual(.full, tv.render_state.dirty);
     try std.testing.expectEqual(@as(usize, 24), tv.countDirtyRows());
@@ -286,7 +301,8 @@ test "escenario 4 headless: resizeGrid pasa el RenderState a .full" {
     const io = std.testing.io;
 
     var tv = try TerminalView.init(io, alloc, 80, 24);
-    defer tv.deinit(alloc);
+    try tv.initStream();
+    defer tv.deinit();
 
     // Consumir el .full inicial.
     try tv.render_state.beginUpdate(alloc, &tv.terminal);
@@ -295,7 +311,7 @@ test "escenario 4 headless: resizeGrid pasa el RenderState a .full" {
     try std.testing.expectEqual(@as(usize, 0), tv.countDirtyRows());
 
     // Redimensionar: el próximo beginUpdate debe ver .full (rejilla inválida).
-    try tv.resizeGrid(alloc, 120, 40);
+    try tv.resizeGrid(120, 40);
     try std.testing.expectEqual(@as(u16, 120), tv.cols());
     try std.testing.expectEqual(@as(u16, 40), tv.rows());
     try tv.render_state.beginUpdate(alloc, &tv.terminal);
@@ -309,7 +325,8 @@ test "feed concurrente desde N hilos: cada linea unica llega intacta a su fila" 
     const io = std.testing.io;
 
     var tv = try TerminalView.init(io, alloc, 80, 24);
-    defer tv.deinit(alloc);
+    try tv.initStream();
+    defer tv.deinit();
 
     // Consumir el .full inicial: sin esto un feed roto (que no alimenta) no
     // se distinguiría de un terminal recién iniciado.

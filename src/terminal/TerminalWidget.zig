@@ -16,6 +16,7 @@ const ghostty_vt = @import("ghostty-vt");
 
 const Terminal = ghostty_vt.Terminal;
 const RenderState = ghostty_vt.RenderState;
+const TerminalView = @import("TerminalView.zig").TerminalView;
 
 // Raw GL — linked via build.zig linkSystemLibrary("GL"), not a new dependency.
 extern "c" fn glClearColor(r: f32, g: f32, b: f32, a: f32) void;
@@ -34,22 +35,27 @@ extern "c" fn glBegin(mode: c_uint) void;
 extern "c" fn glEnd() void;
 extern "c" fn glBlendFunc(sfactor: c_uint, dfactor: c_uint) void;
 extern "c" fn glPixelStorei(pname: c_int, param: c_int) void;
+extern "c" fn glGetString(name: c_uint) ?[*:0]const u8;
 
 extern "c" fn usleep(useconds: c_uint) c_int;
 
 const gl_color_buffer_bit: c_uint = 0x00004000;
 const gl_texture_2d: c_uint = 0x0DE1;
 const gl_rgba: c_uint = 0x1908;
+const gl_bgra: c_uint = 0x80E1; // GL_BGRA — /usr/include/GL/gl.h:1451
 const gl_unsigned_byte: c_uint = 0x1401;
 const gl_nearest: c_int = 0x2600;
 const gl_texture_min_filter: c_int = 0x2801;
 const gl_texture_mag_filter: c_int = 0x2800;
 const gl_quads: c_uint = 0x0007;
 const gl_blend: c_uint = 0x0BE2;
+const gl_one: c_uint = 1; // GL_ONE — /usr/include/GL/gl.h:341
 const gl_src_alpha: c_uint = 0x0302;
 const gl_one_minus_src_alpha: c_uint = 0x0303;
 const gl_unpack_row_length: c_int = 0x0CF2;
 const gl_unpack_alignment: c_int = 0x0CF5;
+const gl_renderer: c_uint = 0x1F01; // GL_RENDERER — /usr/include/GL/gl.h:654
+const gl_version: c_uint = 0x1F02; // GL_VERSION — /usr/include/GL/gl.h:655
 
 pub const TerminalWidget = extern struct {
     parent_instance: Parent,
@@ -59,11 +65,8 @@ pub const TerminalWidget = extern struct {
     bold_desc: ?*pango.FontDescription,
     italic_desc: ?*pango.FontDescription,
     bold_italic_desc: ?*pango.FontDescription,
-    // Terminal + render state
-    terminal: ?*Terminal,
-    render_state: ?*RenderState,
-    lock_state: std.atomic.Value(u8),
-    // alloc and io stored at module level (not extern types)
+    // TerminalView (núcleo: Terminal + RenderState + mutex + Stream)
+    view: ?*TerminalView,
     // Grid
     grid_cols: u16,
     grid_rows: u16,
@@ -71,7 +74,9 @@ pub const TerminalWidget = extern struct {
     cell_h: f64,
     // Harness
     frame_count: u64,
+    frames_requested: u64,
     last_report_us: i64,
+    gl_logged: bool,
     ready: bool,
 
     pub const Parent = gtk.GLArea;
@@ -92,21 +97,7 @@ pub const TerminalWidget = extern struct {
         return gobject.ext.as(T, self);
     }
 
-    fn getAlloc(_: *Self) std.mem.Allocator {
-        return widget_alloc;
-    }
-
-    fn spinLock(self: *Self) void {
-        while (self.lock_state.cmpxchgStrong(0, 1, .acquire, .monotonic) != null) {
-            std.atomic.spinLoopHint();
-        }
-    }
-
-    fn spinUnlock(self: *Self) void {
-        self.lock_state.store(0, .release);
-    }
-
-    /// Configura el terminal y el render state. Llamar después de new().
+    /// Configura el TerminalView. Llamar después de new().
     pub fn setup(
         self: *Self,
         io: std.Io,
@@ -114,52 +105,39 @@ pub const TerminalWidget = extern struct {
         num_cols: u16,
         num_rows: u16,
     ) !void {
-        const term_ptr = try alloc.create(Terminal);
-        errdefer alloc.destroy(term_ptr);
-        term_ptr.* = try Terminal.init(io, alloc, .{ .cols = num_cols, .rows = num_rows });
+        const view_ptr = try alloc.create(TerminalView);
+        errdefer {
+            view_ptr.deinit();
+            alloc.destroy(view_ptr);
+        }
+        view_ptr.* = try TerminalView.init(io, alloc, num_cols, num_rows);
+        try view_ptr.initStream();
 
-        const state_ptr = try alloc.create(RenderState);
-        state_ptr.* = .empty;
-
-        self.terminal = term_ptr;
-        self.render_state = state_ptr;
-        self.lock_state = .init(0);
-        widget_alloc = alloc;
-        widget_io = io;
+        self.view = view_ptr;
         self.grid_cols = num_cols;
         self.grid_rows = num_rows;
     }
 
     pub fn deinitResources(self: *Self) void {
-        const alloc = self.getAlloc();
-        if (self.render_state) |rs| {
-            rs.deinit(alloc);
-            alloc.destroy(rs);
-            self.render_state = null;
-        }
-        if (self.terminal) |t| {
-            t.deinit(alloc);
-            alloc.destroy(t);
-            self.terminal = null;
+        if (self.view) |v| {
+            const alloc = v.alloc;
+            v.deinit();
+            alloc.destroy(v);
+            self.view = null;
         }
     }
 
     /// Alimenta bytes al terminal (puede llamarse desde cualquier hilo).
-    /// Lock → vtStream → nextSlice → unlock → g_idle_add → queueRender.
+    /// view.feed (lock → nextSlice → unlock) → queueRenderFromAnyThread.
     pub fn feed(self: *Self, bytes: []const u8) !void {
-        self.spinLock();
-        if (self.terminal) |t| {
-            var stream = t.vtStream();
-            defer stream.deinit();
-            stream.nextSlice(bytes);
-        }
-        self.spinUnlock();
-
+        const v = self.view orelse return;
+        try v.feed(bytes);
         self.queueRenderFromAnyThread();
     }
 
     /// Marshal: agenda queueRender en el hilo UI via g_idle_add.
     pub fn queueRenderFromAnyThread(self: *Self) void {
+        self.frames_requested +%= 1;
         _ = glib.idleAdd(onIdleQueueRender, self);
     }
 
@@ -177,16 +155,20 @@ pub const TerminalWidget = extern struct {
         self.bold_desc = null;
         self.italic_desc = null;
         self.bold_italic_desc = null;
-        self.terminal = null;
-        self.render_state = null;
-        self.lock_state = .init(0);
+        self.view = null;
         self.grid_cols = 0;
         self.grid_rows = 0;
         self.cell_w = 0;
         self.cell_h = 0;
         self.frame_count = 0;
+        self.frames_requested = 0;
         self.last_report_us = 0;
+        self.gl_logged = false;
         self.ready = false;
+
+        // Connect own signals so onRealize/onResize fire automatically.
+        _ = gtk.Widget.signals.realize.connect(self, ?*anyopaque, &onRealize, null, .{});
+        _ = gtk.GLArea.signals.resize.connect(self, ?*anyopaque, &onResize, null, .{});
     }
 
     fn ensureReady(self: *Self) void {
@@ -212,26 +194,26 @@ pub const TerminalWidget = extern struct {
         self.ready = true;
     }
 
-    fn onRealize(gl_area: *gtk.GLArea, self: *Self) callconv(.c) void {
-        // Make the GL context current so we can set up state.
-        const native = gl_area.as(gtk.Widget).getNative() orelse return;
-        const surface = native.as(gtk.Native).getSurface() orelse return;
-        const gdk_ctx = surface.createGlContext() orelse return;
-        gdk_ctx.makeCurrent();
-
+    fn onRealize(_: *gtk.Widget, self: *Self) callconv(.c) void {
         self.ensureReady();
         self.updateCellMetrics();
     }
 
     fn onResize(_: *gtk.GLArea, width: c_int, height: c_int, self: *Self) callconv(.c) void {
         if (width <= 0 or height <= 0) return;
+        const v = self.view orelse return;
 
         // If we have prior cell metrics, derive new grid dims and resize terminal.
         if (self.cell_w > 0 and self.cell_h > 0 and self.grid_cols > 0 and self.grid_rows > 0) {
             const new_cols: u16 = @intCast(@max(1, @as(i32, @intFromFloat(@round(@as(f64, @floatFromInt(width)) / self.cell_w)))));
             const new_rows: u16 = @intCast(@max(1, @as(i32, @intFromFloat(@round(@as(f64, @floatFromInt(height)) / self.cell_h)))));
             if (new_cols != self.grid_cols or new_rows != self.grid_rows) {
-                self.resizeGridLocked(new_cols, new_rows);
+                v.resizeGrid(new_cols, new_rows) catch |err| {
+                    std.log.warn("TerminalWidget: resize failed: {}", .{err});
+                    return;
+                };
+                self.grid_cols = new_cols;
+                self.grid_rows = new_rows;
                 // Recalculate cell metrics from new grid.
                 self.cell_w = @as(f64, @floatFromInt(width)) / @as(f64, @floatFromInt(self.grid_cols));
                 self.cell_h = @as(f64, @floatFromInt(height)) / @as(f64, @floatFromInt(self.grid_rows));
@@ -241,18 +223,6 @@ pub const TerminalWidget = extern struct {
             self.cell_w = @as(f64, @floatFromInt(width)) / @as(f64, @floatFromInt(self.grid_cols));
             self.cell_h = @as(f64, @floatFromInt(height)) / @as(f64, @floatFromInt(self.grid_rows));
         }
-    }
-
-    fn resizeGridLocked(self: *Self, new_cols: u16, new_rows: u16) void {
-        const t = self.terminal orelse return;
-        self.spinLock();
-        defer self.spinUnlock();
-        t.resize(self.getAlloc(), .{ .cols = new_cols, .rows = new_rows }) catch |err| {
-            std.log.warn("TerminalWidget: resize failed: {}", .{err});
-            return;
-        };
-        self.grid_cols = new_cols;
-        self.grid_rows = new_rows;
     }
 
     fn updateCellMetrics(self: *Self) void {
@@ -268,17 +238,25 @@ pub const TerminalWidget = extern struct {
     fn onRender(self: *Self, ctx: *gdk.GLContext) callconv(.c) c_int {
         gdk.GLContext.makeCurrent(ctx);
 
-        const term = self.terminal orelse return 1;
-        const rs = self.render_state orelse return 1;
+        // D4: log GL profile once so the gate can read it.
+        if (!self.gl_logged) {
+            self.gl_logged = true;
+            if (glGetString(gl_version)) |ver|
+                std.debug.print("terminalview: GL_VERSION={s}\n", .{ver});
+            if (glGetString(gl_renderer)) |ren|
+                std.debug.print("terminalview: GL_RENDERER={s}\n", .{ren});
+        }
 
-        // 1. Lock → beginUpdate → unlock.
-        self.spinLock();
-        rs.beginUpdate(self.getAlloc(), term) catch |err| {
-            self.spinUnlock();
+        const v = self.view orelse return 1;
+
+        // 1. Lock → beginUpdate → unlock (via view's mutex).
+        v.mutex.lockUncancelable(v.io);
+        v.render_state.beginUpdate(v.alloc, &v.terminal) catch |err| {
+            v.mutex.unlock(v.io);
             std.log.warn("TerminalWidget: beginUpdate failed: {}", .{err});
             return 0;
         };
-        self.spinUnlock();
+        v.mutex.unlock(v.io);
 
         // 2. Viewport.
         const widget = self.as(gtk.Widget);
@@ -289,7 +267,7 @@ pub const TerminalWidget = extern struct {
         }
 
         // 3. Clear with terminal background.
-        const bg = rs.colors.background;
+        const bg = v.render_state.colors.background;
         glClearColor(
             @as(f32, @floatFromInt(bg.r)) / 255.0,
             @as(f32, @floatFromInt(bg.g)) / 255.0,
@@ -299,11 +277,11 @@ pub const TerminalWidget = extern struct {
         glClear(gl_color_buffer_bit);
 
         // 4. Draw dirty rows via cairo → GL texture.
-        self.drawDirtyRows(rs, width, height);
+        self.drawDirtyRows(&v.render_state, width, height);
 
         // 5. endUpdate → clean.
-        rs.endUpdate();
-        rs.clean();
+        v.render_state.endUpdate();
+        v.render_state.clean();
 
         // 6. FPS counter.
         self.frame_count += 1;
@@ -315,7 +293,7 @@ pub const TerminalWidget = extern struct {
                 (@as(f64, @floatFromInt(elapsed)) / @as(f64, @floatFromInt(std.time.us_per_s)));
             std.debug.print("terminalview: {d:.1} fps ({d} rows, {d}x{d})\n", .{
                 fps,
-                rs.rows,
+                v.render_state.rows,
                 self.grid_cols,
                 self.grid_rows,
             });
@@ -380,13 +358,13 @@ pub const TerminalWidget = extern struct {
 
                 // Select font description.
                 const desc = if (is_bold and is_italic)
-                    self.bold_italic_desc.?
+                    self.bold_italic_desc orelse return
                 else if (is_bold)
-                    self.bold_desc.?
+                    self.bold_desc orelse return
                 else if (is_italic)
-                    self.italic_desc.?
+                    self.italic_desc orelse return
                 else
-                    self.normal_desc.?;
+                    self.normal_desc orelse return;
 
                 // Foreground color.
                 const raw_fg: gdk.RGBA = if (has_style) fg_color: {
@@ -507,8 +485,11 @@ pub const TerminalWidget = extern struct {
                 col += gw;
             }
 
+            // Flush cairo surface before reading pixel data (cairo contract).
+            surf.flush();
+
             // Upload cairo surface to GL texture and draw quad.
-            drawRowTexture(surf, @intCast(y), vp_height);
+            drawRowTexture(surf, @intCast(y), vp_height, self.cell_h);
         }
     }
 
@@ -519,16 +500,20 @@ pub const TerminalWidget = extern struct {
 
         fn init(class: *Class) callconv(.c) void {
             gtk.GLArea.virtual_methods.render.implement(class, &Self.onRender);
+            gobject.Object.virtual_methods.dispose.implement(class, &Self.onDispose);
             // resize is a signal, not a virtual — connect in instance init.
         }
     };
+
+    fn onDispose(self: *Self) callconv(.c) void {
+        self.deinitResources();
+    }
 };
 
-fn drawRowTexture(surf: *cairo.Surface, row: u16, vp_height: c_int) void {
+fn drawRowTexture(surf: *cairo.Surface, row: u16, vp_height: c_int, cell_h: f64) void {
     const data = surf.imageGetData() orelse return;
     const stride = surf.imageGetStride();
     const surf_w = surf.imageGetWidth();
-    const surf_h = surf.imageGetHeight();
 
     var tex: c_uint = 0;
     glGenTextures(1, &tex);
@@ -537,27 +522,31 @@ fn drawRowTexture(surf: *cairo.Surface, row: u16, vp_height: c_int) void {
     glTexParameteri(gl_texture_2d, gl_texture_mag_filter, gl_nearest);
     glPixelStorei(gl_unpack_row_length, @divTrunc(stride, 4));
     glPixelStorei(gl_unpack_alignment, 1);
+    // D2: cairo .argb32 is BGRA premultiplied — use GL_BGRA, not GL_RGBA.
     glTexImage2D(
         gl_texture_2d,
         0,
-        @intCast(gl_rgba),
+        @intCast(gl_bgra),
         @intCast(surf_w),
-        @intCast(surf_h),
+        @intFromFloat(@ceil(cell_h)),
         0,
-        gl_rgba,
+        gl_bgra,
         gl_unsigned_byte,
         data,
     );
 
+    // D1: use cell_h (f64) for quad origin/height, not @ceil(surf_h).
+    const pix_to_ndc = 2.0 / @as(f32, @floatFromInt(vp_height));
+    const y0: f32 = 1.0 - @as(f32, @floatFromInt(row)) * @as(f32, @floatCast(cell_h)) * pix_to_ndc;
+    const y1_ndc = y0 - @as(f32, @floatCast(cell_h)) * pix_to_ndc;
+
     // Draw textured quad in NDC.
     const x0: f32 = -1.0;
     const x1: f32 = 1.0;
-    const pix_to_ndc = 2.0 / @as(f32, @floatFromInt(vp_height));
-    const y0: f32 = 1.0 - @as(f32, @floatFromInt(row)) * @as(f32, @floatFromInt(surf_h)) * pix_to_ndc;
-    const y1_ndc = y0 - @as(f32, @floatFromInt(surf_h)) * pix_to_ndc;
 
     glEnable(gl_blend);
-    glBlendFunc(gl_src_alpha, gl_one_minus_src_alpha);
+    // D2: premultiplied alpha — GL_ONE, not GL_SRC_ALPHA.
+    glBlendFunc(gl_one, gl_one_minus_src_alpha);
     glEnable(gl_texture_2d);
     glBindTexture(gl_texture_2d, tex);
 
@@ -592,6 +581,12 @@ fn palette_to_rgba(rs: *RenderState, idx: u8) gdk.RGBA {
 }
 
 // ── Harness ────────────────────────────────────────────────────────────
+// D4 DECISIÓN: HUECO — el perfil GL (core vs compatibilidad) no se documenta
+// en headers/gdk4/gtk4. El gate conjunto DEBE leer el log de GL_VERSION/
+// GL_RENDERER impreso por onRender en el primer frame; si el contexto es core,
+// el modo inmediato (glBegin/glEnd) se sustituye ANTES de medir fps.
+// Fuentes: gtkglarea.h (sin mención de perfil), gdkglcontext.h:78-84 (sin
+// mención de profile/core/compat), gdkenums.h:69-70 (solo API GL vs GLES).
 
 const harness_cols: u16 = 200;
 const harness_rows: u16 = 60;
@@ -602,11 +597,6 @@ const harness_app_id = "dev.kelpie.TerminalViewHarness";
 var harness_widget: ?*TerminalWidget = null;
 var harness_io: std.Io = undefined;
 var harness_alloc: std.mem.Allocator = std.heap.page_allocator;
-
-/// Module-level allocator for TerminalWidget (Allocator is not an extern type).
-var widget_alloc: std.mem.Allocator = std.heap.page_allocator;
-/// Module-level Io for TerminalWidget (Io is not an extern type).
-var widget_io: std.Io = undefined;
 
 pub fn runHarness(io: std.Io, alloc: std.mem.Allocator) u8 {
     harness_alloc = alloc;
@@ -621,17 +611,12 @@ pub fn runHarness(io: std.Io, alloc: std.mem.Allocator) u8 {
 }
 
 fn harnessActivate(app: *adw.Application, _: ?*anyopaque) callconv(.c) void {
-    const alloc = harness_alloc;
     const gtk_app = gobject.ext.as(gtk.Application, app);
     const window = adw.ApplicationWindow.new(gtk_app);
     gtk.Window.setDefaultSize(gobject.ext.as(gtk.Window, window), 1600, 900);
 
     const tv = TerminalWidget.new();
     tv.as(gtk.Widget).setSizeRequest(1600, 900);
-    // connect resize signal
-    _ = gtk.GLArea.signals.resize.connect(tv, ?*anyopaque, &onHarnessResize, null, .{});
-    // connect realize signal
-    _ = gtk.Widget.signals.realize.connect(tv, ?*anyopaque, &onHarnessRealize, null, .{});
 
     adw.ApplicationWindow.setContent(window, tv.as(gtk.Widget));
     gtk.Window.present(gobject.ext.as(gtk.Window, window));
@@ -639,24 +624,18 @@ fn harnessActivate(app: *adw.Application, _: ?*anyopaque) callconv(.c) void {
     harness_widget = tv;
 
     // Setup terminal after realize (via idle).
-    _ = glib.idleAdd(onHarnessSetup, alloc.ptr);
+    _ = glib.idleAdd(onHarnessSetup, null);
 }
 
-fn onHarnessRealize(_: *TerminalWidget, _: ?*anyopaque) callconv(.c) void {
-    // Terminal setup happens in onHarnessSetup via idle.
-}
-
-fn onHarnessSetup(user_data: ?*anyopaque) callconv(.c) c_int {
-    const alloc_ptr: *std.mem.Allocator = @ptrCast(@alignCast(user_data));
-    const alloc = alloc_ptr.*;
+fn onHarnessSetup(_: ?*anyopaque) callconv(.c) c_int {
     const tv = harness_widget orelse return @intFromBool(glib.SOURCE_REMOVE);
-    tv.setup(harness_io, alloc, harness_cols, harness_rows) catch |err| {
+    tv.setup(harness_io, harness_alloc, harness_cols, harness_rows) catch |err| {
         std.log.warn("harness setup failed: {}", .{err});
         return @intFromBool(glib.SOURCE_REMOVE);
     };
 
     // Spawn worker thread.
-    _ = std.Thread.spawn(.{}, harnessFeedThread, .{ tv, alloc }) catch |err| {
+    _ = std.Thread.spawn(.{}, harnessFeedThread, .{tv}) catch |err| {
         std.log.warn("harness thread spawn failed: {}", .{err});
         return @intFromBool(glib.SOURCE_REMOVE);
     };
@@ -664,10 +643,7 @@ fn onHarnessSetup(user_data: ?*anyopaque) callconv(.c) c_int {
     return @intFromBool(glib.SOURCE_REMOVE);
 }
 
-fn onHarnessResize(_: *TerminalWidget, _: c_int, _: c_int, _: ?*anyopaque) callconv(.c) void {}
-
-fn harnessFeedThread(tv: *TerminalWidget, alloc: std.mem.Allocator) void {
-    _ = alloc;
+fn harnessFeedThread(tv: *TerminalWidget) void {
     // Generate a chunk of printable ASCII.
     var chunk: [harness_chunk_size]u8 = undefined;
     for (&chunk, 0..) |*b, i| {
@@ -683,4 +659,61 @@ fn harnessFeedThread(tv: *TerminalWidget, alloc: std.mem.Allocator) void {
     }
 
     std.debug.print("harness: fed {d} bytes in chunks of {d}\n", .{ fed, harness_chunk_size });
+}
+
+// ── Tests (headless, no display, no GL) ────────────────────────────────
+
+test "onResize deriva rejilla y llama Terminal.resize" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+
+    var tv = try TerminalView.init(io, alloc, 80, 24);
+    try tv.initStream();
+    defer tv.deinit();
+
+    // Construct widget manually (extern struct, no GObject needed).
+    var widget: TerminalWidget = undefined;
+    widget.view = &tv;
+    widget.grid_cols = 80;
+    widget.grid_rows = 24;
+    widget.cell_w = 10.0;
+    widget.cell_h = 15.0;
+
+    // Resize to 200x900 → 200/10=20 cols, 900/15=60 rows.
+    // onResize ignores gl_area — use aligned sentinel.
+    var dummy_gl: gtk.GLArea = undefined;
+    TerminalWidget.onResize(&dummy_gl, 200, 900, &widget);
+
+    try std.testing.expectEqual(@as(u16, 20), widget.grid_cols);
+    try std.testing.expectEqual(@as(u16, 60), widget.grid_rows);
+    try std.testing.expectEqual(@as(u16, 20), tv.cols());
+    try std.testing.expectEqual(@as(u16, 60), tv.rows());
+}
+
+test "feed incrementa frames_requested" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+
+    var tv = try TerminalView.init(io, alloc, 80, 24);
+    try tv.initStream();
+    defer tv.deinit();
+
+    var widget: TerminalWidget = undefined;
+    widget.view = &tv;
+    widget.grid_cols = 80;
+    widget.grid_rows = 24;
+    widget.cell_w = 10.0;
+    widget.cell_h = 15.0;
+    widget.frames_requested = 0;
+    widget.pango_ctx = null;
+    widget.normal_desc = null;
+    widget.bold_desc = null;
+    widget.italic_desc = null;
+    widget.bold_italic_desc = null;
+
+    try widget.feed("Hello");
+    try std.testing.expectEqual(@as(u64, 1), widget.frames_requested);
+
+    try widget.feed("World");
+    try std.testing.expectEqual(@as(u64, 2), widget.frames_requested);
 }
