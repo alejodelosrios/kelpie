@@ -94,10 +94,8 @@ fn lockMap(self: *Notify) void {
 
 pub fn deinit(self: *Notify) void {
     if (!self.notifs_inited) return;
-    // A spawned thread may still be updating the map. If we can't acquire
-    // the lock, the thread will free its own copies and release the lock;
-    // we skip map cleanup to avoid use-after-free (the process is shutting
-    // down anyway — the3s process.run timeout bounds the wait).
+    // deinit is not safe with threads in flight; there is no call site in
+    // production — adding one first needs a live-thread counter or a join.
     if (!self.map_mutex.tryLock()) return;
     defer self.map_mutex.unlock();
     var it = self.notifs.iterator();
