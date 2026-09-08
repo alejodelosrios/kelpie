@@ -94,11 +94,16 @@ Escenario: un frame con 1 fila cambiada sube exactamente 1 fila; full sube todas
   Entonces el contador reporta exactamente 1 fila subida
   Y tras forzar estado .full el siguiente frame sube las 24
 
-Escenario: 1 MB en trozos de 64 KiB a 60 Hz sobre 200x60 mantiene ≥ 60 fps sin pintar desde el feeder (criterio 2; GATE CONJUNTO con orquestador, ventana Wayland real, NO correr solo)
+Escenario: 1 MB en trozos de 64 KiB a 60 Hz sobre 200x60 mantiene ≥ 60 fps sin pintar desde el feeder (criterio 2; ~~GATE CONJUNTO con orquestador, ventana Wayland real, NO correr solo~~ **VIAJA al issue #107 por decisión del dueño 2026-09-08**)
   Dado el widget visible de 200x60 alimentado por el harness sin PTY
   Cuando se inyecta 1 MB en trozos de 64 KiB a 60 Hz
   Entonces el fps medido es ≥ 60 durante la ráfaga
   Y ningún trazo de pintura ocurre en el hilo que alimenta
+
+  > **Medido 2026-09-08 y FALLADO (no forma parte de este issue):** 1.7–0.6 fps degradando
+  > (GL ES 3.2 Mesa/Intel Iris Plus 645), causa textura-por-fila-y-por-frame. La hipótesis del
+  > plan B queda refutada en esta máquina. Todo el criterio 2 (umbral, harness, número, causa)
+  > vive en #107. #21 entrega el NÚCLEO + widget tras flag con deuda documentada.
 
 Escenario: cada frame termina con clean(); un frame sin cambios no sube nada (criterio 3)
   Dado un frame recién pintado

@@ -602,3 +602,5 @@ Formato: `- [YYYY-MM-DD] #issue — qué se vio · por qué no se arregló ahora
   el atlas premisa del plan B no está implementado (se entrega textura por fila). Decisión del dueño
   pendiente (atlas en #21 / renderer a issue propio / reabrir ADR); mientras tanto NADA se mergea y
   el árbol queda intacto. PR #106 abierto, merge BLOQUEADO hasta la decisión.
+  · **Nota PM 2026-09-08: decidido opción 2 — el renderer viaja al issue #107** (creado con número,
+  causa y referencias); el criterio 2 deja de ser criterio de #21. Esta deuda se paga en #107.
