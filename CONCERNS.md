@@ -589,3 +589,16 @@ Formato: `- [YYYY-MM-DD] #issue — qué se vio · por qué no se arregló ahora
   árbol de #21 intacto entre runs · no lo toca este issue (territorio `src/herdr/`, lease ajeno) y
   amenaza con pintar de rojo el CI del PR al azar · dispara al abrir el PR: si CI sale rojo por este
   test, re-run + enlace a esta entrada, no arreglo dentro de #21.
+
+- [2026-09-08] #21 — GATE DEL CRITERIO 2: FALLA (binario, sin workaround). Medido con el orquestador
+  en ventana Wayland real, harness `--terminalview-harness` 200x60: **1.7 1.0 1.0 1.1 1.0 0.8 0.9
+  0.7 0.6 0.6 0.8 fps (60 rows)** contra umbral 60 — ~60x por debajo y DEGRADANDO, no estabilizando.
+  `GL_VERSION=OpenGL ES 3.2 Mesa 26.2.2 / Intel Iris Plus 645`. El contador marca 60 rows/frame:
+  el widget DIBUJA de verdad (el instrumento es honesto; sin él habría sido un glClear vacío en verde).
+  Causa: `glGenTextures → glTexImage2D → glDeleteTextures` POR FILA Y POR FRAME (60 ciclos/frame) —
+  disparó la entrada «textura por fila y por frame» de arriba, tal como predecía. Dato de milestone:
+  Spike B (GSK) midió ~28 fps; el plan B GL mide ~1 fps — **28x peor que lo reemplazado**. La hipótesis
+  de ADR-0001:108-109 (renderer GL con atlas llegaría a 60) queda MEDIDA Y REFUTADA en esta máquina;
+  el atlas premisa del plan B no está implementado (se entrega textura por fila). Decisión del dueño
+  pendiente (atlas en #21 / renderer a issue propio / reabrir ADR); mientras tanto NADA se mergea y
+  el árbol queda intacto. PR #106 abierto, merge BLOQUEADO hasta la decisión.
