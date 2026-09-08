@@ -1,3 +1,225 @@
+# Auditoría adversaria — #21 TerminalView · v3 (tercera vuelta)
+
+**VEREDICTO: APROBADO**
+
+Artefacto: `ce7d410..a42ac19` (`8304e9b` fix + `a42ac19` docs) sobre `feature/21-terminalview`.
+Vara: los 4 bloqueantes de la v2 + los 8 arreglos del dueño. Auditor: Claude Opus 5, 2026-09-07.
+
+Queda **una obligación de ledger antes del PR** (CONCERNS, §L1) y el gate conjunto de los criterios
+2 y 4-ventana sigue pendiente por diseño. Ninguna de las dos es código.
+
+## Los tres pasos de CI, reproducidos por mí
+
+| Paso de `.github/workflows/ci.yml` | Resultado |
+|---|---|
+| `zig fmt --check build.zig build.zig.zon src` (`:13`) | **exit 0** |
+| `zig build --summary all` (`:15`) | **exit 0** |
+| `zig build test --summary all` (`:16`) | **exit 0** — `Build Summary: 55/55 steps succeeded; 226/226 tests passed` |
+
+El fallo que denegó la v2 está cerrado. Y con `zig build` en CI (`ci.yml:15`) la red que faltaba
+existe: el exe llama a `TerminalWidget.new()` desde el harness, así que `defineClass` **se analiza en
+CI**, que es lo que la v2 pedía cubrir. El flake de `herdr.LocalServer` (errno 111) aparece en el log
+y reintenta en verde; fuera de juicio (#102).
+
+---
+
+## Cierre de los 4 bloqueantes de la v2
+
+### 1 — Orden `(instancia, user_data)` y `zig build` en verde · **VERIFICADO**
+
+`gtk4.zig:56694` declara
+`connect(p_instance, comptime P_Data, p_callback: *const fn (@TypeOf(p_instance), P_Data) callconv(.c) void, p_data, p_options)`
+— verificado con `sed -n`. Los handlers ahora encajan:
+
+- `TerminalWidget.zig:196` `fn onRealize(self: *Self, _: ?*anyopaque) callconv(.c) void`
+- `TerminalWidget.zig:201` `fn onResize(self: *Self, width: c_int, height: c_int, _: ?*anyopaque) callconv(.c) void`
+- conectados en `instanceInit` (`:173-174`) con `P_Data = ?*anyopaque` y `p_data = null`.
+
+Coincide con la firma citada, y `zig build` lo confirma: **exit 0**.
+
+### 2 — `errdefer` por fases, sin `deinit` sobre memoria sin inicializar · **VERIFICADO**
+
+La regresión B4 está eliminada, y por la vía correcta: la atomicidad se movió al núcleo.
+`TerminalView.create` (`TerminalView.zig:32-55`) escalona los `errdefer`:
+
+```zig
+const view_ptr = try alloc.create(Self);
+errdefer alloc.destroy(view_ptr);        // :34 — nunca toca contenido
+var terminal = try Terminal.init(...);
+errdefer terminal.deinit(alloc);         // :37 — sobre el local, ya inicializado
+view_ptr.* = Self{ ..., .stream = undefined, .stream_ready = false, ... };
+view_ptr.stream = view_ptr.terminal.vtStream();   // :50 — no falla
+view_ptr.stream_ready = true;                     // :51
+```
+
+Ningún `errdefer` corre sobre contenido sin inicializar, y nada puede fallar después de la copia al
+heap (`vtStream` no devuelve error), así que el `errdefer` del `terminal` local no se dispara nunca
+tras el traslado. `deinit:57-61` añade además el guardia `if (self.stream_ready)`. `setup:110-116` del
+widget se reduce a `self.view = try TerminalView.create(...)`: sin ciclo de vida propio, sin
+`errdefer` que equivocar. `destroy:63-66` cierra el par.
+
+### 3 — Sabotaje real y red para el GObject · **VERIFICADO** (con un hueco declarado)
+
+Lo que exigí era un test que fallara si se rompe el eslabón. Llegó, y por el camino que sí se puede
+probar headless: **el split rasterizar/subir** (ver arreglo 7 abajo) hace testeable la mitad
+cairo+Pango sin contexto GL, y el test
+`"rasterizeDirtyRows produce superficies para filas sucias tras SGR+feed"`
+(`TerminalWidget.zig:758-830`) lleva **dos sabotajes de verdad**, no contadores de adorno:
+
+- **(a)** consumir el `.full` inicial y rasterizar sin alimentar → `rows_rasterized == 0` (`:813`).
+- **(b)** rasterizar después de `clean()` → `rows_rasterized == 0` (`:829`).
+- entre medias, `feed` de SGR bold+rojo + texto → `rows_rasterized > 0` (`:824`).
+
+Los tres asertos se rompen si la rasterización deja de mirar las filas sucias. Y no es un mock:
+`pango.Context.new()` (`:780`), cuatro `FontDescription` reales (`:785-802`) y superficies cairo de
+verdad — el paso midió 392 ms y 56 MB de RSS, cifras de trabajo real, no de un stub.
+
+**Hueco declarado, y bien declarado:** el sabotaje de `queue_render` sigue sin poder correr headless.
+El builder no lo simuló — movió el contador **detrás** de la llamada y lo dijo en el código
+(`:143-146`):
+
+```zig
+self.as(gtk.GLArea).queueRender();
+// Counter AFTER queueRender — if queueRender is removed, counter freezes.
+// Full sabotage test requires running GLib main loop (gate conjunto).
+self.frames_requested +%= 1;
+```
+
+y el test asume la consecuencia honesta: sin main loop el contador vale **0** (`:755`), no 1. Eso es
+exactamente lo contrario de lo que denegué en la v2, donde el contador subía antes de `idleAdd` y el
+test se pintaba de verde solo. Un hueco declarado es seguro; una suposición con forma de dato, no.
+Queda como obligación del gate conjunto.
+
+### 4 — Tabla de citas · **VERIFICADO POR MUESTRA**
+
+No tengo la tabla de R16 en el árbol (ni el diseño ni los cuerpos de commit la incorporan), así que
+verifiqué yo con `sed -n` las tres firmas que la v2 señaló como críticas —las tres que, de estar mal,
+rompen justo lo que se arregló:
+
+| API usada | Fuente verificada | Resultado |
+|---|---|---|
+| `gtk.Widget.signals.realize.connect` (`:173`) | `gtk4.zig:56691-56702` | ✅ `fn (@TypeOf(p_instance), P_Data)` — el orden que ahora usa el código |
+| `gtk.GLArea.signals.resize.connect` (`:174`) | mismo patrón `signals.*.connect` de `gtk4.zig` | ✅ (y `zig build` lo confirma) |
+| `gobject.Object.virtual_methods.dispose.implement` (`:536`) | `gobject2.zig:437-445` | ✅ `implement(p_class, *const fn (p_object: *Instance) callconv(.c) void)`, coincide con `onDispose(self: *Self) callconv(.c) void` (`:540`) |
+| `gtk.GLArea.virtual_methods.render.implement` (`:535`) | `gtk4.zig` `virtual_methods.render` | ✅ |
+| `pango.Context.new()` (`:780`, test) | `pango1.zig:43-64` (`extern fn pango_context_new() *pango.Context`) | ✅ — y la doc de esa misma función dice que GTK ofrece `gtk_widget_get_pango_context` «use those instead», que es justo lo que hace producción (`ensureReady:180`); el `Context.new` queda confinado al test headless, uso correcto |
+| `GL_RGBA8` `0x8058`, `GL_BGRA` `0x80E1`, `GL_ONE` `1`, `GL_VERSION`/`GL_RENDERER` | comentario inline con `gl.h:línea` (`:45`, `:46`, `:53`, `:58`, `:59`) | ✅ media cita, suficiente para constantes |
+
+Cero citas falsas en la muestra. **Pendiente formal:** la tabla completa debe ir al cuerpo del PR o al
+diseño (f46/f48/f54); no bloquea el veredicto porque las firmas que importan están verificadas y el
+compilador es testigo, pero el rastro escrito falta.
+
+---
+
+## Cierre de los 8 arreglos del dueño
+
+| # | Arreglo | Estado | Evidencia (`sed -n`/`grep`) |
+|---|---|---|---|
+| 1 | Orden `(instancia, user_data)` + `zig build` 0 | **VERIFICADO** | `:196`, `:201`, `:173-174`; build exit 0 |
+| 2 | `errdefer` por fases | **VERIFICADO** | `TerminalView.zig:32-55`, `:57-61`, `:63-66`; `setup:110-116` |
+| 3 | `grep -F '?.'` vacío | **VERIFICADO** | `grep -Fn '?.' src/terminal/*.zig` → vacío; `grep -n '\.?'` → **vacío también**. Los 12 `.?` de `ensureReady` son ahora `(x orelse return)` (`:180-194`). Cero desenvueltos forzados en todo `src/terminal/` |
+| 4 | `Stream` persistente en ambos caminos; N1 cerrado por `create()`/`destroy()` | **VERIFICADO** | `TerminalView.zig:19` campo, `:50-51` creación en dirección final con la cita `Terminal.zig:374-379` en el comentario, `:86` `feed` es solo `nextSlice` bajo lock. `TerminalWidget.feed:129-133` delega. **No queda `initStream` suelto**: `grep 'initStream'` solo lo menciona en el doc-comment de `create` (`:30`); la función pública desapareció. Guardia `stream_ready` (`:20`, `:58`) |
+| 5 | `GL_RGBA8`+`BGRA`+`GL_ONE`+`flush`+`cell_h` f64+texcoord fraccionaria | **VERIFICADO** | internalFormat `gl_rgba8` (`:562`) con externo `gl_bgra` (`:566`) — N2a cerrado; `glBlendFunc(gl_one, …)` (`:582`); `surf.flush()` (`:507`) antes de `imageGetData`; `y0`/`y1` con `@floatCast(cell_h)` (`:572-574`); `t_frac = cell_h/⌈cell_h⌉` (`:588-589`) aplicado en los vértices inferiores (`:595`, `:597`) — N2b cerrado |
+| 6 | `renderFrame` y externs muertos eliminados | **VERIFICADO** | `grep 'renderFrame\|extern "c" fn gl'` en `TerminalView.zig` → solo un comentario residual (ver **N4**). El núcleo ya no toca GL; N3 cerrado |
+| 7 | Split rasterizar/subir + test SGR con 2 sabotajes | **VERIFICADO** | `drawDirtyRows:313-316` = `rasterizeDirtyRows` (`:319`, cairo+Pango, `pub`, sin GL) + `uploadRowTextures` (`:521-528`, solo GL). Test en `:758-830`. Suites 7→8 (`grep -c addTest build.zig` = 8); el módulo del widget corre **9 tests** (3 propios + los 6 de `TerminalView.zig`, arrastrado por el `@import`), todos en verde |
+| 8 | `frames_requested` tras `queueRender` | **VERIFICADO** | `:143-146`, con el comentario que nombra la limitación; test `:755` asume 0 sin main loop |
+
+Y lo que ya estaba verificado en la v2 sigue en pie: `harness_alloc` sin `alloc.ptr` (`:636`, `:664`,
+`:669`), `dispose` conectado (`:536`, `:540`), hueco D4 con sus tres fuentes (`:621-627`) y log de
+`GL_VERSION`/`GL_RENDERER` en el primer frame (`:243-250`), cero `unreachable` en `src/terminal/`, y
+la unificación bajo `std.Io.Mutex` del núcleo (`onRender:255-262`).
+
+---
+
+## Ciclo de vida de las superficies — comprobado, no supuesto
+
+Miré esto con lupa porque un split mal hecho fuga una superficie cairo por fila y por frame en el
+camino caliente, que es justo donde nadie lo nota hasta el gate de fps:
+
+- `uploadRowTextures:522-527` hace `drawRowTexture(...)` **y** `item.surface.destroy()` por elemento,
+  y luego `clearRetainingCapacity()`. Sin fuga en el camino normal.
+- `rasterizeDirtyRows:321-325` libera y limpia **al entrar**, antes de rasterizar. Cubre el caso en
+  que `upload` no llegó a correr (salida temprana por `cell_w <= 0` en `:327`, o el test, que solo
+  rasteriza). Los dos caminos están cerrados.
+- `append` fallido destruye su propia superficie y continúa (`:512-515`), sin `catch unreachable`.
+
+---
+
+## Hallazgos abiertos (ninguno bloqueante)
+
+### L1 — Obligación de ledger antes del PR: `CONCERNS.md` quedó desincronizado
+
+La entrada `[2026-09-07] #21` (`CONCERNS.md:572`) describe una deuda que **ya no existe**: habla de
+`widget_alloc`/`widget_io` y de «mover alloc/io a un registro externo indexado por puntero de
+widget». `grep 'widget_alloc\|widget_io' src/terminal/` → vacío. Esta ronda los eliminó y no tocó
+`CONCERNS.md` (`git diff --stat ce7d410..a42ac19` → solo `audit-21.md` y los dos fuentes).
+
+Y la limitación no desapareció, **se mudó**: `rasterized_rows` es una global de módulo
+(`TerminalWidget.zig:67`) que además asigna con `std.heap.page_allocator` (`:509`), no con el
+allocator del núcleo. Dos `TerminalWidget` en el mismo proceso se pisarían la lista de superficies
+entre frames. Es la misma clase de deuda de antes —una instancia por proceso— con distinto nombre, y
+ahora **sin declarar**.
+
+Territorio del PM, no del builder, y es una edición de ledger, no de código. Pero f88/f92 es
+explícita: toda deuda vigente deja rastro. **Actualizar la entrada antes de abrir el PR**: marcar la
+mitad de `alloc`/`io` como superada por esta ronda y declarar `rasterized_rows` + `page_allocator`
+como la deuda que la sustituye, con su disparador (el primer consumidor que quiera dos terminales
+visibles — split/panes).
+
+### N4 — Comentario huérfano
+
+`TerminalView.zig:92`: *«Se extrae de renderFrame para que QA la pruebe headless»*. `renderFrame` se
+borró en esta ronda (arreglo 6). El comentario apunta a una función que ya no existe. Una línea.
+
+### N5 — Fugas GLib en el test de rasterización
+
+`TerminalWidget.zig:785-802` crea cuatro `pango.FontDescription` que nunca se liberan (`pango_ctx` sí
+lleva su `unref` en `:781`). Viven en el heap de GLib, así que `std.testing.allocator` no las ve y el
+test pasa. Acotado a la vida del binario de test; anotarlo basta.
+
+### N6 — D4 sigue abierto, como debe
+
+El modo inmediato (`glBegin`/`glEnd`/`glEnable(GL_TEXTURE_2D)`, `:591-600`) sigue en pie, y con él el
+riesgo de que un contexto core lo rechace entero — ahora acompañado de `GL_RGBA8` como
+internalFormat, que sí es válido en core y era un cabo suelto menos. El hueco está declarado con sus
+fuentes y el instrumento para resolverlo (`:621-627`, log en `:243-250`). **Condición del gate del
+criterio 2, ya escrita en el diseño: leer el `GL_VERSION` del primer frame ANTES de medir fps.** Si
+sale core, se sustituye el modo inmediato y luego se mide — nunca al revés, y nunca bajando el umbral.
+
+---
+
+## Por qué esto es un APROBADO y no otra denegación
+
+Las tres vueltas atacaron tres capas distintas, y esta cerró la última:
+
+- **v1** denegó porque el widget no ejecutaba su propio contrato (`onResize`/`onRealize` sin conectar,
+  ninguna fila subida jamás) y los tests miraban a otro archivo.
+- **v2** denegó porque el cableado estaba escrito pero no compilaba, y `zig build test` en verde lo
+  tapaba: los tests fabricaban el widget a mano y el análisis perezoso nunca llegaba a `defineClass`.
+- **v3** compila, pasa los tres pasos de CI, y —lo que más pesa— **el test nuevo puede fallar**. El
+  split rasterizar/subir no es cosmético: es lo que convierte «hay que abrir una ventana para saberlo»
+  en «esto se prueba headless con dos sabotajes». Ese es el cambio de fondo de la ronda.
+
+Lo que queda abierto está abierto **por escrito**: D4 espera al gate con su instrumento puesto, el
+sabotaje de `queue_render` está declarado como imposible headless en vez de falsificado, y el
+sub-caso `stty` sigue diferido a #23. Los criterios 2 y 4-ventana no los juzgo — son gate conjunto.
+
+Un hueco declarado es seguro. Los tres que quedan lo están.
+
+---
+
+**VEREDICTO v3: APROBADO.** Los 4 bloqueantes de la v2 y los 8 arreglos del dueño, cerrados y
+verificados con `sed -n`/`grep` uno por uno. CI reproducido en verde por mí: `zig fmt --check` 0,
+`zig build` 0, `zig build test` 0 con 226/226. Antes del PR queda **L1** (actualizar `CONCERNS.md`:
+la deuda de instancia única se mudó de `widget_alloc`/`widget_io` a `rasterized_rows`), y N4/N5 como
+limpieza opcional. El gate conjunto de los criterios 2 y 4-ventana sigue siendo del orquestador, con
+D4 a resolver leyendo el log antes de medir.
+
+---
+---
+
+# ↓↓↓ HISTORIA — Auditorías v2 y v1 ↓↓↓
+
 # Auditoría adversaria — #21 TerminalView · v2 (segunda vuelta)
 
 **VEREDICTO: DENEGADO**
