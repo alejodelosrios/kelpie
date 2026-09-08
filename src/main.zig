@@ -5,6 +5,7 @@ const spike_b = @import("ui/spike_b.zig");
 const app_shell = @import("ui/app_shell.zig");
 const sidebar = @import("ui/sidebar.zig");
 const herdr_link = @import("ui/herdr_link.zig");
+const terminal_widget = @import("terminal/TerminalWidget.zig");
 
 pub const name = "kelpie";
 // ponytail: duplicated from build.zig.zon on purpose; wire a build option when the version is set by CI.
@@ -38,11 +39,13 @@ pub fn main(init: std.process.Init) !void {
     var herdr_probe_flag = false;
     var run_spike_b = false;
     var version_flag = false;
+    var run_terminalview_harness = false;
     for (args[1..]) |arg| {
         if (std.mem.eql(u8, arg, "--vt-info")) vt_info = true;
         if (std.mem.eql(u8, arg, "--herdr-probe")) herdr_probe_flag = true;
         if (std.mem.eql(u8, arg, "--spike-b")) run_spike_b = true;
         if (std.mem.eql(u8, arg, "--version")) version_flag = true;
+        if (std.mem.eql(u8, arg, "--terminalview-harness")) run_terminalview_harness = true;
         if (std.mem.eql(u8, arg, "--demo-sidebar")) {
             app_shell.demo_sidebar_n = 4;
         } else if (std.mem.startsWith(u8, arg, "--demo-sidebar=")) {
@@ -64,6 +67,8 @@ pub fn main(init: std.process.Init) !void {
         return herdr_probe.run(init);
     } else if (run_spike_b) {
         return spike_b.run();
+    } else if (run_terminalview_harness) {
+        std.process.exit(terminal_widget.runHarness(init.io, init.gpa));
     } else if (vt_info) {
         var t: ghostty_vt.Terminal = try .init(init.io, init.gpa, .{
             .cols = 80,
@@ -114,4 +119,7 @@ test {
     // Store (#12) ya no tiene módulo de test propio: su consumidor real (el
     // sidebar de #16) vive en el exe, así que sus tests corren aquí.
     _ = @import("model/Store.zig");
+    // TerminalView (#21): módulo propio con addTest, pero la referencia aquí
+    // asegura que zig build test lo descubra también desde el root.
+    _ = @import("terminal/TerminalView.zig");
 }
