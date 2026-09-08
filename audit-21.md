@@ -1,3 +1,217 @@
+# Auditoría adversaria — #21 TerminalView · v2 (segunda vuelta)
+
+**VEREDICTO: DENEGADO**
+
+Artefacto: `14afbec..ce7d410` (3 commits) sobre `feature/21-terminalview`. Vara: los 14 arreglos de
+la v1 (conservada íntegra más abajo). Auditor: Claude Opus 5, 2026-09-07.
+
+## El hecho que decide
+
+**`zig build` FALLA. El ejecutable no compila.**
+
+```
+src/terminal/TerminalWidget.zig:170:67: error: expected type
+  '*const fn (T, ?*anyopaque) callconv(.c) void',
+  found '*const fn (*gtk4.Widget, T) callconv(.c) void'
+        _ = gtk.Widget.signals.realize.connect(self, ?*anyopaque, &onRealize, null, .{});
+                                                                  ^~~~~~~~~~
+  note: T = *terminal.TerminalWidget.TerminalWidget
+referenced by:
+    getGObjectType: src/terminal/TerminalWidget.zig:87:26
+Build Summary: 38/41 steps succeeded (1 failed)
+```
+
+`gtk4.zig:56694` declara `connect(p_instance, comptime P_Data, p_callback: *const fn
+(@TypeOf(p_instance), P_Data) callconv(.c) void, p_data, p_options)`: el **primer** parámetro del
+callback es la instancia y el **último** el `user_data`. Los dos handlers están escritos al revés —
+`onRealize(_: *gtk.Widget, self: *Self)` (`:197`) y `onResize(_: *gtk.GLArea, w, h, self: *Self)`
+(`:202`) — que es la convención de `bindTemplateCallback` de `surface.zig`, donde `self` viaja como
+`user_data`. Aquí se pasa `self` como *instancia* y `null` como `user_data`. Ambas conexiones
+(`:170` y `:171`) están mal por la misma razón; el compilador corta en la primera.
+
+**El arreglo #1 de la v1 — el arreglo central de toda la ronda — está ROTO en tiempo de compilación.**
+
+### Y por qué el árbol parece verde
+
+`zig build test` → **exit 0**. `zig build` → **exit 1**.
+
+La divergencia no es casual, y es el hallazgo más grave de esta vuelta. `gobject.ext.defineClass`
+(`:81-86`) solo se instancia cuando algo llama a `TerminalWidget.new()` (`:92`), y lo único que la
+llama es el harness. Los dos tests nuevos **no construyen el widget por GObject**: lo fabrican a mano
+en la pila —
+
+```zig
+var widget: TerminalWidget = undefined;   // :668 y :693
+widget.view = &tv;
+TerminalWidget.onResize(&dummy_gl, 200, 900, &widget);   // :683 — llamada DIRECTA al handler
+```
+
+— así que el análisis perezoso de Zig nunca llega a `instanceInit`, nunca comprueba las conexiones, y
+la suite pasa sobre un widget que **no puede existir como GObject**.
+
+Es la lección B2 de la v1 repetida un piso más arriba: entonces el handler existía y no estaba
+conectado; ahora la conexión está escrita y no compila — y en las dos vueltas los tests salieron
+verdes. El propio diseño enmendado lo había anticipado por escrito
+(`roadmap/designs/21-terminalview.md`, §Riesgos): *«La cadena se prueba conectada, no existente
+(f108): `onResize`/`onRealize`/`render` se verifican por sus call sites/conexiones (`grep` de
+conexiones), nunca leyendo la función.»* El `grep` se hizo; el `zig build` no.
+
+Regla del repo violada, sin ambigüedad: **«Nada se mergea en rojo»** (CLAUDE.md §Modelo de ramas). El
+check `build` del ruleset de `develop` saldría rojo. El cuerpo de `ce7d410` afirma «suites 53->55»,
+una afirmación sobre un árbol verde que no se sostiene.
+
+---
+
+## Cierre uno por uno de los 14 arreglos de la v1
+
+| # | Arreglo v1 | Estado | Evidencia |
+|---|---|---|---|
+| 1 | realize/resize conectados en `instanceInit`; handlers vacíos del harness fuera | **ROTO** | Conexiones presentes en `TerminalWidget.zig:170-171` pero **no compilan** (error arriba). `onHarnessRealize`/`onHarnessResize` sí **ELIMINADOS** (`grep` → vacío). Media victoria que no sirve: el exe no enlaza. |
+| 2 | `ensureReady` en `onRealize`; `orelse` en el camino de render | **VERIFICADO** (con reserva) | `onRealize:197-200` llama `ensureReady()` + `updateCellMetrics()`. Los cuatro `.?` del render son ahora `orelse return`: `:356`, `:358`, `:360`, `:362`. `grep '\.?'` deja 12 ocurrencias, **todas** en `ensureReady:179-193`, fuera del camino de render. Reserva: siguen siendo `.?` sin comprobar sobre `pango.FontDescription.new()`; el fallo es improbable pero el patrón es el que la v1 marcó. |
+| 3 | Harness usa `harness_alloc` | **VERIFICADO** | `:626` `glib.idleAdd(onHarnessSetup, null)`; `:629-632` `tv.setup(harness_io, harness_alloc, …)`. `grep 'alloc\.ptr'` → vacío. La confusión de tipos de la v1 está eliminada de raíz. |
+| 4 | `Stream` persistente; `feed` solo `nextSlice`, en ambos caminos | **VERIFICADO** (con trampa nueva) | `TerminalView.zig:25` campo `stream: Stream`; `:53-56` `initStream()`; `:81` `feed` es solo `self.stream.nextSlice(bytes)` bajo lock. `TerminalWidget.feed:129-133` delega en `v.feed` — un solo camino, sin duplicación. `Stream = ghostty_vt.TerminalStream` verificado en `lib_vt.zig:94`. El comentario `:52-55` justifica correctamente por qué el stream se crea tras fijar la dirección del `Terminal` (`vtStream` captura `self` vía `vtHandler`). Ver **N1**. |
+| 5 | D2 (`GL_BGRA` + `GL_ONE`), D3 (`flush`), D1 (`cell_h` f64) | **VERIFICADO** (con reserva) | D2: `gl_bgra = 0x80E1` (`:45`), usado como formato en `:548`; `glBlendFunc(gl_one, gl_one_minus_src_alpha)` (`:551`, `gl_one` en `:52`). D3: `surf.flush()` en `:488`, justo antes de `drawRowTexture`. D1: `:554-556` usan `@floatCast(cell_h)` para origen y alto del quad. Ver **N2**. |
+| 6 | `spinlock`/`widget_alloc`/`widget_io`/`alloc.ptr` eliminados | **VERIFICADO** | `grep -rn 'spinLock\|spinUnlock\|lock_state\|cmpxchg' src/terminal/` → vacío. `grep 'widget_alloc\|widget_io'` → vacío. `grep 'alloc\.ptr'` → vacío. El único `@ptrCast(@alignCast(user_data))` que queda (`:145`) es el `self` del idle, legítimo. C1 y C2 de la v1 cerrados por unificación sobre `std.Io.Mutex` (`:251-258` toma el mutex del núcleo). |
+| 7 | Deriva por `@ceil` | **VERIFICADO** | `:554-556`: `y0 = 1.0 - row * cell_h * pix_to_ndc`, `y1 = y0 - cell_h * pix_to_ndc`. El `@ceil` sobrevive solo donde toca — alto en píxeles de la superficie cairo (`:306`, `:546`). La deriva acumulada de la v1 desaparece. |
+| 8 | `dispose` conectado + `errdefer` OOM | **PARCIAL / EMPEORADO** | `dispose`: **VERIFICADO** — `Class.init:503` `gobject.Object.virtual_methods.dispose.implement(class, &Self.onDispose)`; `onDispose:506-508` → `deinitResources()`. La fuga C3 de la v1 está cerrada. `errdefer`: **ROTO, y peor que antes** — ver **B4**. |
+| 9 | D4: hueco declarado + log `GL_VERSION` | **VERIFICADO** | Hueco: `:583-589`, con las tres fuentes consultadas y el resultado negativo (`gtkglarea.h` sin mención de perfil, `gdkglcontext.h:78-84`, `gdkenums.h:69-70`) y la orden de sustituir el modo inmediato **antes** de medir si el contexto sale core. Log: `:241-247`, `glGetString(GL_VERSION)` + `GL_RENDERER` una sola vez, guardado por `gl_logged`. Es exactamente lo que la v1 pidió: un hueco declarado, no una suposición. |
+| 10 | Cobertura del widget: 2 tests con sabotaje + módulo propio | **PARCIAL** | Módulo: **VERIFICADO** — `build.zig:143-176`, `terminal_widget_mod` con `ghostty-vt` + los 14 imports gobject + GL, `addTest` en `:175-176`; suites 7 → 8. Tests: existen dos (`:665`, `:690`). **El sabotaje no es real** — ver **B5**. |
+| 11 | Tabla de citas completa de la sesión | **NO PRESENTADA** | No está en el árbol: el diff de `roadmap/designs/21-terminalview.md` no añade una sola fila a §«Firmas de API», y los cuerpos de los 3 commits son prosa. Las APIs nuevas de esta vuelta —`gobject.Object.virtual_methods.dispose.implement`, `gtk.Widget.signals.realize.connect`, `gtk.GLArea.signals.resize.connect`, `cairo.Surface.flush`, `glGetString`, `GL_BGRA`/`GL_ONE`/`GL_VERSION`/`GL_RENDERER`— siguen sin cita verificada. Los tres literales GL sí llevan comentario con `gl.h:línea` (`:45`, `:52`, `:57-58`), que es media cita. **Y la firma de `connect` es justamente la que rompe la compilación**: una tabla de citas hecha habría cazado esto antes que yo. Pídemela y la verifico con `sed -n` en la próxima vuelta. |
+
+---
+
+## Hallazgos nuevos de esta vuelta
+
+### B4 — `deinit()` sobre memoria sin inicializar (regresión del arreglo 8)
+
+`TerminalWidget.zig:108-115`:
+```zig
+const view_ptr = try alloc.create(TerminalView);
+errdefer {
+    view_ptr.deinit();          // ← corre con view_ptr.* == undefined
+    alloc.destroy(view_ptr);
+}
+view_ptr.* = try TerminalView.init(io, alloc, num_cols, num_rows);
+try view_ptr.initStream();
+```
+
+`alloc.create` devuelve memoria **sin inicializar**. Si `TerminalView.init` falla (OOM), el `errdefer`
+llama `view_ptr.deinit()` sobre basura → `self.stream.deinit()`, `self.render_state.deinit()` y
+`self.terminal.deinit()` sobre punteros inventados. La v1 señalaba aquí una **fuga**; la v2 la ha
+convertido en **corrupción de memoria**. Un arreglo que empeora lo que arregla.
+
+*Arreglo:* `errdefer alloc.destroy(view_ptr);` primero; tras `init` exitoso, un segundo
+`errdefer view_ptr.deinit();`.
+
+### B5 — Los dos tests del widget no sabotean nada
+
+El diseño enmendado encarga (§Escenarios, 7º): *«Cuando se alimenta un byte y **se retira el
+`queue_render`** → Entonces el frame no llega (sabotaje que prueba el eslabón)»*.
+
+Lo entregado (`:690-717`) cuenta `frames_requested`, un contador **añadido para el test**
+(`:78`, incrementado en `:139` *antes* de `glib.idleAdd`). Borrar la línea que de verdad importa —
+`self.as(gtk.GLArea).queueRender()` en `onIdleQueueRender:146` — deja los dos tests **en verde**. El
+sabotaje no toca el eslabón que dice probar.
+
+El primer test (`:665-687`) llama `TerminalWidget.onResize(...)` **directamente**. Prueba la
+aritmética del handler (200/10 = 20 cols, 900/15 = 60 rows, y que llega a `Terminal.resize`), lo cual
+está bien y no es poco — pero **no prueba el cableado**, que es lo que el escenario 7 existe para
+probar y lo que hoy está roto. El diseño ya lo admitía a medias («probado headless llamando al
+handler»); la consecuencia es que la única red que quedaba para el cableado era `zig build`, y nadie
+la miró.
+
+Adicional: `var widget: TerminalWidget = undefined` en la pila (`:668`, `:693`) se pasa a
+`glib.idleAdd` (`:140`) desde `widget.feed`. La fuente idle queda registrada en el contexto principal
+apuntando a memoria de pila ya muerta cuando el test retorna. Hoy es inerte (ningún test itera un
+main loop), pero es una mina para el primer test que lo haga.
+
+### N1 — `initStream()` es un segundo paso obligatorio sin red
+
+`TerminalView.init` deja `stream = undefined` (`:45`) y confía en que el llamante invoque
+`initStream()` inmediatamente. El razonamiento es correcto y está bien documentado (`:52-55`), pero:
+`feed` antes de `initStream` es UB, y `deinit` (`:59-63`) llama `self.stream.deinit()`
+incondicionalmente — sobre `undefined` si `initStream` nunca corrió. B4 pisa exactamente ese camino.
+*Sugerencia:* un `stream_ready: bool` comprobado en `deinit`, o devolver `*Self` desde un
+`create(alloc)` que haga las dos cosas y no deje estado a medias.
+
+### N2 — Dos reservas menores del pipeline de píxeles
+
+- `glTexImage2D(:544-552)` pasa `GL_BGRA` también como **internalFormat**. `GL_BGRA` no es un
+  internalFormat válido en GL estricto (lo son `GL_RGBA`/`GL_RGBA8`); GL legacy lo tolera, core lo
+  rechaza. Se enreda con D4: si el contexto sale core, esta línea falla además del modo inmediato.
+- La textura mide `@ceil(cell_h)` px de alto (`:546`) pero el quad mide `cell_h` con texcoords `0..1`,
+  así que cada fila se comprime verticalmente en un factor `cell_h/⌈cell_h⌉`. Con `GL_NEAREST` eso es
+  aliasing de hasta una línea de píxel por fila. *Arreglo:* `glTexCoord2f(_, cell_h/⌈cell_h⌉)` en los
+  dos vértices inferiores. Cambio bueno respecto de la v1 (la deriva acumulada era peor), pero no
+  está terminado.
+
+### N3 — `TerminalView.renderFrame` es duplicación residual
+
+La enmienda G1 dice: *«el widget… NO duplica feed/resize/count/lock»*, y se cumple para esos cuatro.
+Pero `TerminalView.renderFrame:90-122` sigue conteniendo su propio `beginUpdate`/`endUpdate`/`clean`
++ `glViewport`/`glClearColor`/`glClear`, que es lo mismo que hace `onRender:250-282`, y **nadie la
+llama** (`grep`: cero call sites fuera del propio archivo). Es el resto de la arquitectura de dos
+implementaciones que G1 vino a eliminar. Bórrala: sus `extern "c" fn gl*` (`TerminalView.zig:17-20`)
+se van con ella, y el módulo del núcleo deja de necesitar `linkSystemLibrary("GL")`.
+
+---
+
+## Lo que sí mejoró, y no debe perderse
+
+La ronda no fue en balde. Ocho de los catorce arreglos están genuinamente hechos, y tres de ellos
+eran los conceptualmente difíciles:
+
+- **G1 cumplido en lo esencial.** El widget compone `?*TerminalView` (`:68`) y delega feed, resize,
+  lock y estado VT. Una sola verdad sobre el contrato. La unificación se llevó por delante el
+  spinlock, `widget_alloc` y `widget_io` sin dejar rastro — `grep` vacío en las tres.
+- **A1 cerrado bien.** El `Stream` persistente respeta lo que `Terminal.zig:374-379` exige por
+  escrito, y el comentario explica el porqué del orden (dirección final del `Terminal`), que es la
+  parte que un lector futuro habría roto sin darse cuenta.
+- **D4 resuelto como se pide en este repo:** un hueco declarado con las fuentes consultadas y su
+  resultado negativo, más un instrumento (`GL_VERSION`/`GL_RENDERER` en el primer frame) para que el
+  gate lea el dato en vez de suponerlo. Un hueco declarado es seguro; una suposición con forma de
+  dato, no.
+- **B1 y C3 eliminados de raíz**, no parcheados.
+- **D1/D2/D3** aplicados con comentario que nombra el hallazgo que los originó.
+
+---
+
+## Para APROBAR
+
+Bloqueantes:
+
+1. **Que `zig build` pase.** Corregir el orden de parámetros de `onRealize` y `onResize` a
+   `fn (*Self, …, ?*anyopaque)` según `gtk4.zig:56694`, o conectar con `self` como `user_data`.
+   Verificar con `zig build && zig build test`, **los dos**, y pegar los dos exit codes.
+2. **B4** — `errdefer alloc.destroy` antes; `errdefer view_ptr.deinit()` después del `init` exitoso.
+3. **B5** — un test que falle si se borra `queueRender()` de `onIdleQueueRender`, y un test que
+   construya el widget **por GObject** (`TerminalWidget.new()`) para que `defineClass` se analice.
+   Ese segundo test es la red que faltaba: habría cazado el fallo de compilación.
+4. **Arreglo 11** — la tabla de citas de la sesión, con `sed -n` línea por línea, incluyendo
+   `signals.*.connect` y `virtual_methods.dispose.implement`. Pégamela y la verifico.
+
+No bloqueantes:
+
+5. **N1** — cerrar la ventana `init`/`initStream`.
+6. **N2** — internalFormat `GL_RGBA8`; texcoord `cell_h/⌈cell_h⌉`.
+7. **N3** — borrar `TerminalView.renderFrame` y sus `extern "c" fn gl*`.
+8. Los `.?` de `ensureReady` a `orelse`.
+
+Todo lo demás de la v1 queda cerrado.
+
+---
+
+**VEREDICTO v2: DENEGADO.** El árbol no compila (`zig build` exit 1, `TerminalWidget.zig:170`), y el
+`zig build test` en verde lo esconde porque los tests fabrican el widget a mano y nunca instancian el
+GObject. Ocho arreglos están bien hechos; el noveno —el cableado, que era el corazón de la v1— está
+escrito pero roto, y uno (`errdefer`) empeoró. Ninguno de los cuatro bloqueantes es conceptual: son
+una firma, un `errdefer`, un test que instancie el widget y una tabla de citas.
+
+---
+---
+
+# ↓↓↓ HISTORIA — Auditoría v1 (primera vuelta, artefacto `403d377..14afbec`) ↓↓↓
+
 # Auditoría adversaria — #21 TerminalView
 
 **VEREDICTO: DENEGADO**
