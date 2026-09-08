@@ -575,6 +575,11 @@ Formato: `- [YYYY-MM-DD] #issue — qué se vio · por qué no se arregló ahora
   proceso, suficiente para el harness y la ventana única de M2 · dispara cuando un consumidor
   necesite dos terminales visibles (split/panes): hay que mover alloc/io a un registro externo
   indexado por puntero de widget.
+  · **Nota PM 2026-09-07 (auditoría v3, L1): ⚠️ SUPERADA en la forma, MUDADA en el fondo — la
+  tercera ronda eliminó `widget_alloc`/`widget_io` (el widget compone `*TerminalView`), pero la
+  limitación de instancia única se mudó a `rasterized_rows` (global de módulo,
+  `TerminalWidget.zig:67`, con `page_allocator` en `:509`): dos widgets rasterizando a la vez
+  pisarían la misma lista. Sigue valiendo el disparo (split/panes), con el sitio nuevo.
 - [2026-09-07] #21 — `drawRowTexture` crea y destruye una textura GL por fila sucia y por frame
   (`glGenTextures`/`glDeleteTextures` en el camino caliente) en vez de un atlas persistente · se
   aceptó porque el criterio 2 (≥ 60 fps en 200×60) es quien juzga, con el número medido en el gate
